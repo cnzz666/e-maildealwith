@@ -123,7 +123,7 @@ export default {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: 'your-verified-domain@yourdomain.com', // 需在Resend验证的域名
+          from: 'admin@ilqx.dpdns.org', // 需在Resend验证的域名
           to: to,
           subject: subject,
           text: text,
