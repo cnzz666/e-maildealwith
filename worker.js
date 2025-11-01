@@ -1,4 +1,4 @@
-﻿// 完整的邮件管理系统 - 玻璃效果界面 + 邮件查看回复功能
+﻿// 完整的邮件管理系统 - 修复内容读取 + 移动端优化
 export default {
   async email(message, env, ctx) {
     try {
@@ -13,16 +13,26 @@ export default {
       
       console.log('邮件信息:', { from, to, subject });
       
-      // 尝试获取邮件内容
+      // 改进的邮件内容获取方式
       let text = '';
       let html = '';
       
       try {
+        // 尝试多种方式获取邮件内容
         text = await message.text();
+        if (!text || text.trim() === '') {
+          // 如果text为空，尝试从raw获取
+          const raw = await message.raw;
+          if (raw) {
+            text = new TextDecoder().decode(raw);
+            // 简单清理，只保留文本部分
+            text = text.replace(/<[^>]*>/g, '').substring(0, 10000);
+          }
+        }
         console.log('文本内容长度:', text.length);
       } catch (e) {
         console.log('获取文本内容失败:', e.message);
-        text = '无法读取邮件内容';
+        text = '邮件内容解析失败，原始数据已保存';
       }
       
       try {
@@ -31,6 +41,16 @@ export default {
       } catch (e) {
         console.log('获取HTML内容失败:', e.message);
         html = '';
+      }
+      
+      // 如果内容都为空，保存原始数据
+      if ((!text || text.trim() === '') && (!html || html.trim() === '')) {
+        try {
+          const raw = await message.raw;
+          text = new TextDecoder().decode(raw).substring(0, 5000);
+        } catch (e) {
+          text = '无法读取邮件内容 - 原始数据获取失败';
+        }
       }
       
       // 检查拦截规则
@@ -59,8 +79,6 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
-    
-    console.log('收到请求:', request.method, path);
     
     // 初始化数据库
     try {
@@ -712,35 +730,38 @@ export default {
 <html lang="zh-CN">
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <title>邮件管理系统</title>
     <style>
-        /* 玻璃效果样式 */
+        /* 玻璃效果样式 - 优化移动端 */
         html, body {
             height: 100%;
             margin: 0;
-            overflow: auto;
+            padding: 0;
+            overflow-x: hidden;
             background-color: #e0f7fa;
+            font-size: 16px;
+            line-height: 1.6;
         }
         body {
-            font-family: 'Roboto', Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
             min-height: 100vh;
             color: #333333;
             background-image: url('https://www.loliapi.com/acg/');
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
+            background-attachment: fixed;
             position: relative;
-            overflow: hidden;
-            filter: none;
+            overflow-y: auto;
         }
         body::after {
             content: '';
-            position: absolute;
+            position: fixed;
             top: 0;
             left: 0;
             width: 100%;
@@ -748,221 +769,302 @@ export default {
             background-image: inherit;
             background-size: cover;
             background-position: center;
-            filter: blur(8px);
+            filter: blur(12px);
             z-index: -2;
         }
         body::before {
             content: '';
-            position: absolute;
+            position: fixed;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background: linear-gradient(45deg, rgba(79, 195, 247, 0.2), rgba(176, 196, 222, 0.2));
+            background: linear-gradient(135deg, rgba(79, 195, 247, 0.25), rgba(176, 196, 222, 0.25));
             z-index: -1;
         }
         
-        /* 内容容器 */
+        /* 内容容器 - 移动端优化 */
         .content {
             text-align: center;
-            max-width: 95%;
-            width: 100%;
-            padding: 30px;
-            background-color: rgba(255, 255, 255, 0.3);
-            border-radius: 15px;
-            box-shadow: 0 8px 32px rgba(79, 195, 247, 0.3), 0 0 10px rgba(176, 196, 222, 0.2);
-            backdrop-filter: blur(5px);
-            border: 1px solid rgba(79, 195, 247, 0.3);
-            transform: scale(0.5);
-            opacity: 0.5;
-            filter: blur(10px);
-            transition: transform 1s ease-out, opacity 1s ease-out, filter 1s ease-out;
+            width: 95%;
+            max-width: 1200px;
+            padding: 25px 20px;
+            margin: 20px auto;
+            background-color: rgba(255, 255, 255, 0.35);
+            border-radius: 20px;
+            box-shadow: 0 15px 35px rgba(79, 195, 247, 0.25), 0 5px 15px rgba(176, 196, 222, 0.2);
+            backdrop-filter: blur(12px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            transform: scale(0.95);
+            opacity: 0;
+            transition: all 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
             position: relative;
             z-index: 1;
-            margin: 10px;
             box-sizing: border-box;
         }
         .content.loaded {
             transform: scale(1);
             opacity: 1;
-            filter: blur(0);
-        }
-        .content:hover {
-            transform: scale(1.03);
-            box-shadow: 0 12px 40px rgba(79, 195, 247, 0.5), 0 0 20px rgba(176, 196, 222, 0.3);
         }
         
         /* 标题样式 */
         h1 {
-            font-size: 2.5rem;
-            margin-bottom: 20px;
+            font-size: 2.2rem;
+            margin: 0 0 25px 0;
             color: #0277bd;
-            text-shadow: 0 0 5px rgba(79, 195, 247, 0.3);
+            text-shadow: 0 2px 8px rgba(79, 195, 247, 0.4);
+            font-weight: 700;
+            letter-spacing: -0.5px;
         }
         h2 {
-            color: #0277bd;
-            margin-bottom: 15px;
-            text-shadow: 0 0 5px rgba(79, 195, 247, 0.3);
+            font-size: 1.6rem;
+            margin: 0 0 20px 0;
+            color: #0288d1;
+            text-shadow: 0 1px 4px rgba(79, 195, 247, 0.3);
+            font-weight: 600;
+        }
+        h3 {
+            font-size: 1.3rem;
+            margin: 0 0 15px 0;
+            color: #039be5;
+            font-weight: 600;
         }
         
-        /* 输入框和按钮样式 */
+        /* 输入框和按钮样式 - 移动端优化 */
         input, textarea, select, button {
-            margin: 15px auto;
-            padding: 12px 20px;
-            font-size: 16px;
-            border-radius: 25px;
+            margin: 18px auto;
+            padding: 16px 22px;
+            font-size: 17px;
+            border-radius: 16px;
             outline: none;
             display: block;
-            width: 80%;
-            max-width: 400px;
-            transition: all 0.3s ease;
+            width: 90%;
+            max-width: 450px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-sizing: border-box;
+            border: 2px solid transparent;
+            font-family: inherit;
         }
         input, textarea, select {
-            background-color: rgba(255, 255, 255, 0.5);
-            border: 1px solid rgba(79, 195, 247, 0.5);
+            background-color: rgba(255, 255, 255, 0.7);
+            border: 2px solid rgba(79, 195, 247, 0.4);
             color: #333333;
-            text-align: center;
+            text-align: left;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
         }
         textarea {
             text-align: left;
-            min-height: 120px;
+            min-height: 160px;
             resize: vertical;
+            line-height: 1.5;
         }
         input:focus, textarea:focus, select:focus {
-            background-color: rgba(255, 255, 255, 0.7);
-            border-color: #0277bd;
-            box-shadow: 0 0 10px rgba(79, 195, 247, 0.3);
+            background-color: rgba(255, 255, 255, 0.9);
+            border-color: #0288d1;
+            box-shadow: 0 6px 20px rgba(79, 195, 247, 0.4);
+            transform: translateY(-2px);
         }
         button {
-            background: linear-gradient(45deg, #4fc3f7, #81d4fa);
+            background: linear-gradient(135deg, #4fc3f7, #29b6f6);
             border: none;
-            color: #333333;
+            color: white;
             cursor: pointer;
-            font-weight: bold;
-            text-transform: uppercase;
-            letter-spacing: 1px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            box-shadow: 0 6px 20px rgba(41, 182, 246, 0.4);
+            position: relative;
+            overflow: hidden;
         }
         button:hover {
-            background: linear-gradient(45deg, #29b6f6, #4fc3f7);
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(79, 195, 247, 0.4);
+            background: linear-gradient(135deg, #29b6f6, #039be5);
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(41, 182, 246, 0.5);
+        }
+        button:active {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px rgba(41, 182, 246, 0.4);
         }
         button.small {
             width: auto;
-            padding: 8px 15px;
-            font-size: 14px;
-            margin: 5px;
+            padding: 12px 20px;
+            font-size: 15px;
+            margin: 8px;
+            border-radius: 12px;
         }
         button.danger {
-            background: linear-gradient(45deg, #f44336, #e57373);
+            background: linear-gradient(135deg, #f44336, #e53935);
+            box-shadow: 0 6px 20px rgba(244, 67, 54, 0.4);
+        }
+        button.danger:hover {
+            background: linear-gradient(135deg, #e53935, #d32f2f);
+            box-shadow: 0 8px 25px rgba(244, 67, 54, 0.5);
         }
         button.success {
-            background: linear-gradient(45deg, #4caf50, #81c784);
+            background: linear-gradient(135deg, #4caf50, #43a047);
+            box-shadow: 0 6px 20px rgba(76, 175, 80, 0.4);
+        }
+        button.success:hover {
+            background: linear-gradient(135deg, #43a047, #388e3c);
+            box-shadow: 0 8px 25px rgba(76, 175, 80, 0.5);
         }
         button.warning {
-            background: linear-gradient(45deg, #ff9800, #ffb74d);
+            background: linear-gradient(135deg, #ff9800, #f57c00);
+            box-shadow: 0 6px 20px rgba(255, 152, 0, 0.4);
+        }
+        button.warning:hover {
+            background: linear-gradient(135deg, #f57c00, #ef6c00);
+            box-shadow: 0 8px 25px rgba(255, 152, 0, 0.5);
         }
         
-        /* 邮件列表样式 */
+        /* 邮件列表样式 - 移动端优化 */
         .email-list {
-            max-height: 500px;
+            max-height: 65vh;
             overflow-y: auto;
-            margin: 20px 0;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 10px;
-            padding: 10px;
+            margin: 25px 0;
+            background: rgba(255, 255, 255, 0.25);
+            border-radius: 16px;
+            padding: 15px;
+            box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
         }
         .email-item {
-            background: rgba(255, 255, 255, 0.3);
-            margin: 10px 0;
-            padding: 15px;
-            border-radius: 10px;
-            border-left: 4px solid #4fc3f7;
+            background: rgba(255, 255, 255, 0.4);
+            margin: 16px 0;
+            padding: 20px;
+            border-radius: 14px;
+            border-left: 6px solid #4fc3f7;
             text-align: left;
             word-break: break-word;
-            transition: all 0.3s ease;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.5);
         }
         .email-item.unread {
             border-left-color: #ff5722;
-            background: rgba(255, 87, 34, 0.1);
+            background: rgba(255, 87, 34, 0.15);
+            box-shadow: 0 4px 15px rgba(255, 87, 34, 0.2);
         }
         .email-item:hover {
-            transform: translateX(5px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transform: translateX(8px) translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+            background: rgba(255, 255, 255, 0.5);
         }
         .email-actions {
-            margin-top: 10px;
+            margin-top: 16px;
             display: flex;
-            gap: 10px;
+            gap: 12px;
             flex-wrap: wrap;
+            justify-content: flex-start;
         }
         
         /* 标签页样式 */
         .tabs {
             display: flex;
             flex-wrap: wrap;
-            margin-bottom: 20px;
-            border-bottom: 1px solid rgba(79, 195, 247, 0.3);
+            margin: 0 0 25px 0;
+            border-bottom: 2px solid rgba(79, 195, 247, 0.4);
+            gap: 8px;
         }
         .tab {
-            padding: 10px 20px;
+            padding: 14px 24px;
             cursor: pointer;
             background: rgba(255, 255, 255, 0.3);
-            border: 1px solid rgba(79, 195, 247, 0.3);
+            border: 2px solid rgba(79, 195, 247, 0.3);
             border-bottom: none;
-            border-radius: 8px 8px 0 0;
-            margin-right: 5px;
-            margin-bottom: -1px;
+            border-radius: 12px 12px 0 0;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            flex: 1;
+            min-width: 120px;
+            text-align: center;
+            box-sizing: border-box;
         }
         .tab.active {
-            background: rgba(79, 195, 247, 0.3);
-            font-weight: bold;
+            background: rgba(79, 195, 247, 0.4);
+            font-weight: 600;
+            border-color: rgba(79, 195, 247, 0.6);
+            transform: translateY(2px);
+        }
+        .tab:hover:not(.active) {
+            background: rgba(79, 195, 247, 0.2);
+            transform: translateY(-2px);
         }
         
         /* 邮件详情样式 */
         .email-detail {
-            background: rgba(255, 255, 255, 0.3);
-            border-radius: 10px;
-            padding: 20px;
+            background: rgba(255, 255, 255, 0.4);
+            border-radius: 16px;
+            padding: 25px;
             margin: 20px 0;
             text-align: left;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.5);
         }
         .email-header {
-            border-bottom: 1px solid rgba(79, 195, 247, 0.3);
-            padding-bottom: 15px;
-            margin-bottom: 15px;
+            border-bottom: 2px solid rgba(79, 195, 247, 0.3);
+            padding-bottom: 20px;
+            margin-bottom: 20px;
+        }
+        .email-header p {
+            margin: 12px 0;
+            font-size: 16px;
+            line-height: 1.5;
         }
         .email-content {
-            line-height: 1.6;
+            line-height: 1.7;
             white-space: pre-wrap;
+            font-size: 16px;
+            background: rgba(255, 255, 255, 0.3);
+            padding: 20px;
+            border-radius: 12px;
+            margin: 15px 0;
+            border: 1px solid rgba(255, 255, 255, 0.4);
         }
         .email-html-content {
             background: rgba(255, 255, 255, 0.5);
-            padding: 15px;
-            border-radius: 5px;
-            margin-top: 15px;
-            max-height: 400px;
+            padding: 20px;
+            border-radius: 12px;
+            margin-top: 20px;
+            max-height: 50vh;
             overflow-y: auto;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.1);
         }
         
         /* 统计信息样式 */
         .stats {
             display: flex;
             gap: 20px;
-            margin-bottom: 20px;
+            margin: 0 0 30px 0;
             flex-wrap: wrap;
             justify-content: center;
         }
         .stat-card {
             flex: 1;
-            min-width: 150px;
-            padding: 15px;
-            background: rgba(255, 255, 255, 0.3);
-            border-radius: 10px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            min-width: 160px;
+            padding: 20px 15px;
+            background: rgba(255, 255, 255, 0.35);
+            border-radius: 16px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.12);
             text-align: center;
-            border: 1px solid rgba(79, 195, 247, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            transition: all 0.3s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.15);
+        }
+        .stat-card h3 {
+            margin: 0 0 12px 0;
+            font-size: 1.1rem;
+            color: #555;
+        }
+        .stat-card p {
+            margin: 0;
+            font-size: 2rem;
+            font-weight: 700;
+            color: #0277bd;
         }
         
         /* 弹窗样式 */
@@ -973,58 +1075,91 @@ export default {
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.5);
+            background: rgba(0, 0, 0, 0.7);
             z-index: 1000;
             align-items: center;
             justify-content: center;
+            padding: 20px;
+            box-sizing: border-box;
+            backdrop-filter: blur(8px);
         }
         .modal-content {
-            background: rgba(255, 255, 255, 0.9);
-            padding: 20px;
-            border-radius: 15px;
-            max-width: 90%;
-            max-height: 80%;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 25px;
+            border-radius: 20px;
+            width: 95%;
+            max-width: 900px;
+            max-height: 85vh;
             overflow-y: auto;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-            backdrop-filter: blur(10px);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.6);
+            animation: modalAppear 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+        @keyframes modalAppear {
+            from {
+                opacity: 0;
+                transform: scale(0.9) translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
         }
         .modal-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
-            border-bottom: 1px solid #ddd;
-            padding-bottom: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 15px;
         }
         .close-modal {
             background: none;
             border: none;
-            font-size: 24px;
+            font-size: 28px;
             cursor: pointer;
             color: #666;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+        .close-modal:hover {
+            background: rgba(0, 0, 0, 0.1);
+            color: #333;
         }
         
         /* 状态按钮 */
         .status-btn {
             position: fixed;
-            top: 20px;
-            right: 20px;
-            background: rgba(255, 255, 255, 0.3);
-            border: 1px solid rgba(79, 195, 247, 0.5);
+            top: 25px;
+            right: 25px;
+            background: rgba(255, 255, 255, 0.4);
+            border: 2px solid rgba(79, 195, 247, 0.5);
             border-radius: 50%;
-            width: 50px;
-            height: 50px;
+            width: 60px;
+            height: 60px;
             display: flex;
             align-items: center;
             justify-content: center;
             cursor: pointer;
             z-index: 100;
-            backdrop-filter: blur(5px);
-            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
         }
         .status-btn:hover {
-            background: rgba(79, 195, 247, 0.3);
-            transform: scale(1.1);
+            background: rgba(79, 195, 247, 0.4);
+            transform: scale(1.1) rotate(15deg);
+            box-shadow: 0 12px 30px rgba(79, 195, 247, 0.4);
+        }
+        .status-btn span {
+            font-size: 28px;
+            filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
         }
         
         /* 其他样式 */
@@ -1032,84 +1167,240 @@ export default {
             display: none !important;
         }
         .section {
-            margin: 20px 0;
-            padding: 20px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 10px;
+            margin: 25px 0;
+            padding: 25px;
+            background: rgba(255, 255, 255, 0.25);
+            border-radius: 16px;
             width: 100%;
             box-sizing: border-box;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.08);
         }
         .message {
-            padding: 10px;
-            margin: 10px 0;
-            border-radius: 10px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            border-radius: 12px;
             text-align: center;
+            font-weight: 500;
+            border: 1px solid transparent;
         }
         .success {
-            background: rgba(76, 175, 80, 0.3);
+            background: rgba(76, 175, 80, 0.2);
             color: #2e7d32;
+            border-color: rgba(76, 175, 80, 0.3);
         }
         .error {
-            background: rgba(244, 67, 54, 0.3);
+            background: rgba(244, 67, 54, 0.2);
             color: #c62828;
+            border-color: rgba(244, 67, 54, 0.3);
         }
         .warning {
-            background: rgba(255, 152, 0, 0.3);
+            background: rgba(255, 152, 0, 0.2);
             color: #ef6c00;
+            border-color: rgba(255, 152, 0, 0.3);
         }
         .form-group {
-            margin: 15px 0;
+            margin: 20px 0;
             text-align: left;
         }
         label {
             display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
+            margin-bottom: 10px;
+            font-weight: 600;
             color: #0277bd;
+            font-size: 16px;
         }
         .sender-display {
             display: flex;
             align-items: center;
             justify-content: center;
-            margin: 10px 0;
+            margin: 15px 0;
+            gap: 0;
         }
         .sender-input {
-            border-radius: 25px 0 0 25px !important;
-            width: 30% !important;
+            border-radius: 14px 0 0 14px !important;
+            width: 35% !important;
             margin: 0 !important;
             text-align: center;
+            border-right: none;
         }
         .domain-display {
-            background: rgba(255, 255, 255, 0.5);
-            padding: 12px 15px;
-            border: 1px solid rgba(79, 195, 247, 0.5);
+            background: rgba(255, 255, 255, 0.6);
+            padding: 16px 18px;
+            border: 2px solid rgba(79, 195, 247, 0.4);
             border-left: none;
-            border-radius: 0 25px 25px 0;
+            border-radius: 0 14px 14px 0;
             color: #333;
+            font-weight: 500;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+        small {
+            display: block;
+            margin-top: 8px;
+            color: #666;
+            font-size: 14px;
+        }
+        
+        /* 滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(79, 195, 247, 0.5);
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(79, 195, 247, 0.7);
         }
         
         /* 移动端优化 */
         @media (max-width: 768px) {
+            body {
+                justify-content: flex-start;
+                padding: 15px 0;
+                font-size: 15px;
+            }
             .content {
-                max-width: 95%;
-                padding: 20px;
+                width: 92%;
+                padding: 20px 15px;
+                margin: 15px auto;
+                border-radius: 18px;
             }
             h1 {
-                font-size: 2rem;
+                font-size: 1.9rem;
+                margin-bottom: 20px;
+            }
+            h2 {
+                font-size: 1.4rem;
+                margin-bottom: 18px;
+            }
+            h3 {
+                font-size: 1.2rem;
             }
             input, textarea, select, button {
-                width: 90%;
-                font-size: 14px;
-                padding: 10px;
+                width: 95%;
+                padding: 18px 20px;
+                font-size: 16px;
+                margin: 16px auto;
+                border-radius: 14px;
+            }
+            .tabs {
+                flex-direction: column;
+                gap: 5px;
+            }
+            .tab {
+                padding: 16px;
+                border-radius: 12px;
+                margin: 0;
+                border: 2px solid rgba(79, 195, 247, 0.3);
+                border-bottom: 2px solid rgba(79, 195, 247, 0.3);
+            }
+            .tab.active {
+                border-radius: 12px;
+                transform: none;
             }
             .stats {
                 flex-direction: column;
+                gap: 15px;
             }
             .stat-card {
                 min-width: auto;
+                padding: 18px 12px;
+            }
+            .stat-card p {
+                font-size: 1.8rem;
+            }
+            .email-list {
+                max-height: 60vh;
+                padding: 12px;
+                border-radius: 14px;
+            }
+            .email-item {
+                padding: 18px;
+                margin: 14px 0;
+                border-radius: 12px;
+            }
+            .email-actions {
+                gap: 8px;
+                justify-content: center;
+            }
+            .email-actions button {
+                flex: 1;
+                min-width: 120px;
+                margin: 4px;
             }
             .sender-input {
-                width: 40% !important;
+                width: 45% !important;
+                padding: 16px 12px;
+            }
+            .domain-display {
+                padding: 16px 14px;
+                font-size: 14px;
+            }
+            .status-btn {
+                width: 55px;
+                height: 55px;
+                top: 20px;
+                right: 20px;
+            }
+            .status-btn span {
+                font-size: 24px;
+            }
+            .modal-content {
+                padding: 20px;
+                border-radius: 18px;
+            }
+            .section {
+                padding: 20px;
+                margin: 20px 0;
+                border-radius: 14px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .content {
+                width: 90%;
+                padding: 18px 12px;
+            }
+            h1 {
+                font-size: 1.7rem;
+            }
+            input, textarea, select, button {
+                padding: 16px 18px;
+                font-size: 15px;
+            }
+            .email-item {
+                padding: 16px;
+            }
+            .sender-input {
+                width: 50% !important;
+            }
+            .email-actions {
+                flex-direction: column;
+            }
+            .email-actions button {
+                width: 100%;
+                margin: 5px 0;
+            }
+        }
+        
+        /* 加载动画 */
+        .loading {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #4fc3f7;
+            animation: spin 1s ease-in-out infinite;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
             }
         }
     </style>
@@ -1117,14 +1408,14 @@ export default {
 <body>
     <!-- 状态检查按钮 -->
     <div class="status-btn" onclick="showSystemStatus()">
-        <span style="font-size: 24px;">⚙️</span>
+        <span>⚙️</span>
     </div>
 
     <!-- 系统状态弹窗 -->
     <div id="system-status-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h2>系统状态</h2>
+                <h2>📊 系统状态</h2>
                 <button class="close-modal" onclick="closeModal('system-status-modal')">&times;</button>
             </div>
             <div id="system-status-content">
@@ -1137,7 +1428,7 @@ export default {
     <div id="email-detail-modal" class="modal">
         <div class="modal-content" style="max-width: 800px;">
             <div class="modal-header">
-                <h2>邮件详情</h2>
+                <h2>📧 邮件详情</h2>
                 <button class="close-modal" onclick="closeModal('email-detail-modal')">&times;</button>
             </div>
             <div id="email-detail-content">
@@ -1148,52 +1439,52 @@ export default {
 
     <!-- 登录页面 -->
     <div id="login-section" class="content ${isLoggedIn ? 'hidden' : ''}">
-        <h1>邮件管理系统</h1>
+        <h1>📬 邮件管理系统</h1>
         <div class="section">
             <h2>管理员登录</h2>
             <input type="text" id="username" placeholder="用户名" value="admin">
             <input type="password" id="password" placeholder="密码" value="1591156135qwzxcv">
-            <button onclick="login()">登录</button>
+            <button onclick="login()">🔑 登录</button>
             <div id="login-message" class="message"></div>
             
-            ${!dbStatus.initialized ? '<div class="message warning"><p>数据库未初始化</p><button onclick="resetDatabase()" class="small">初始化数据库</button></div>' : ''}
+            ${!dbStatus.initialized ? '<div class="message warning"><p>⚠️ 数据库未初始化</p><button onclick="resetDatabase()" class="small warning">初始化数据库</button></div>' : ''}
         </div>
     </div>
 
     <!-- 管理主界面 -->
     <div id="admin-interface" class="content ${isLoggedIn ? '' : 'hidden'}">
-        <h1>邮件管理系统</h1>
+        <h1>📬 邮件管理系统</h1>
         
         <!-- 统计信息 -->
         <div class="stats">
             <div class="stat-card">
-                <h3>总邮件</h3>
+                <h3>📥 总邮件</h3>
                 <p id="total-emails">0</p>
             </div>
             <div class="stat-card">
-                <h3>未读邮件</h3>
+                <h3>📨 未读邮件</h3>
                 <p id="unread-emails">0</p>
             </div>
             <div class="stat-card">
-                <h3>垃圾邮件</h3>
+                <h3>🚫 垃圾邮件</h3>
                 <p id="spam-emails">0</p>
             </div>
         </div>
 
         <div class="tabs">
-            <div class="tab active" onclick="showTab('inbox')">收件箱</div>
-            <div class="tab" onclick="showTab('spam')">垃圾邮件</div>
-            <div class="tab" onclick="showTab('send')">发送邮件</div>
-            <div class="tab" onclick="showTab('settings')">设置</div>
+            <div class="tab active" onclick="showTab('inbox')">📥 收件箱</div>
+            <div class="tab" onclick="showTab('spam')">🚫 垃圾邮件</div>
+            <div class="tab" onclick="showTab('send')">📤 发送邮件</div>
+            <div class="tab" onclick="showTab('settings')">⚙️ 设置</div>
         </div>
 
         <!-- 收件箱 -->
         <div id="tab-inbox" class="tab-content">
             <div class="section">
-                <h2>收件箱</h2>
-                <button onclick="loadEmails(1)">刷新邮件列表</button>
+                <h2>📥 收件箱</h2>
+                <button onclick="loadEmails(1)">🔄 刷新邮件列表</button>
                 <div id="inbox-list" class="email-list">
-                    <div class="message">加载中...</div>
+                    <div class="message">📨 加载中...</div>
                 </div>
             </div>
         </div>
@@ -1201,10 +1492,10 @@ export default {
         <!-- 垃圾邮件 -->
         <div id="tab-spam" class="tab-content hidden">
             <div class="section">
-                <h2>垃圾邮件</h2>
-                <button onclick="loadEmails(3)">刷新垃圾邮件</button>
+                <h2>🚫 垃圾邮件</h2>
+                <button onclick="loadEmails(3)">🔄 刷新垃圾邮件</button>
                 <div id="spam-list" class="email-list">
-                    <div class="message">加载中...</div>
+                    <div class="message">📨 加载中...</div>
                 </div>
             </div>
         </div>
@@ -1212,7 +1503,7 @@ export default {
         <!-- 发送邮件 -->
         <div id="tab-send" class="tab-content hidden">
             <div class="section">
-                <h2>发送邮件</h2>
+                <h2>📤 发送邮件</h2>
                 <div class="form-group">
                     <label for="fromUser">发件人:</label>
                     <div class="sender-display">
@@ -1233,8 +1524,8 @@ export default {
                     <label for="body">内容:</label>
                     <textarea id="body" placeholder="邮件内容"></textarea>
                 </div>
-                <button onclick="sendEmail()">发送邮件</button>
-                <button onclick="clearForm()">清空</button>
+                <button onclick="sendEmail()">📤 发送邮件</button>
+                <button onclick="clearForm()">🗑️ 清空</button>
                 <div id="send-message" class="message"></div>
             </div>
         </div>
@@ -1242,10 +1533,10 @@ export default {
         <!-- 设置 -->
         <div id="tab-settings" class="tab-content hidden">
             <div class="section">
-                <h2>系统设置</h2>
-                <button onclick="resetDatabase()" class="danger">重置数据库</button>
-                <p><small>警告: 这将删除所有邮件、文件夹和规则</small></p>
-                <button onclick="logout()">退出登录</button>
+                <h2>⚙️ 系统设置</h2>
+                <button onclick="resetDatabase()" class="danger">🔄 重置数据库</button>
+                <p><small>⚠️ 警告: 这将删除所有邮件、文件夹和规则</small></p>
+                <button onclick="logout()">🚪 退出登录</button>
             </div>
         </div>
     </div>
@@ -1286,19 +1577,19 @@ export default {
                 if (result.success) {
                     content.innerHTML = \`
                         <div class="email-detail">
-                            <h3>数据库状态</h3>
+                            <h3>📊 数据库状态</h3>
                             <p><strong>数据库表:</strong> \${JSON.stringify(result.debug.tables.map(t => t.name))}</p>
                             <p><strong>邮件总数:</strong> \${result.debug.emailCount}</p>
                             <p><strong>文件夹:</strong> \${JSON.stringify(result.debug.folders.map(f => f.name))}</p>
                             <p><strong>更新时间:</strong> \${new Date(result.debug.timestamp).toLocaleString()}</p>
                         </div>
-                        <button onclick="resetDatabase()" class="danger small">重置数据库</button>
+                        <button onclick="resetDatabase()" class="danger small">🔄 重置数据库</button>
                     \`;
                 } else {
-                    content.innerHTML = '<p class="error">获取系统状态失败: ' + result.message + '</p>';
+                    content.innerHTML = '<p class="error">❌ 获取系统状态失败: ' + result.message + '</p>';
                 }
             } catch (error) {
-                content.innerHTML = '<p class="error">请求失败: ' + error.message + '</p>';
+                content.innerHTML = '<p class="error">❌ 请求失败: ' + error.message + '</p>';
             }
             
             modal.style.display = 'flex';
@@ -1323,14 +1614,14 @@ export default {
                     const email = result.email;
                     let contentHtml = '';
                     
-                    if (email.html_body) {
+                    if (email.html_body && email.html_body.trim() !== '') {
                         contentHtml = \`
                             <div class="email-detail">
                                 <div class="email-header">
-                                    <p><strong>发件人:</strong> \${escapeHtml(email.sender)}</p>
-                                    <p><strong>收件人:</strong> \${escapeHtml(email.recipient)}</p>
-                                    <p><strong>主题:</strong> \${escapeHtml(email.subject)}</p>
-                                    <p><strong>时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
+                                    <p><strong>📧 发件人:</strong> \${escapeHtml(email.sender)}</p>
+                                    <p><strong>📮 收件人:</strong> \${escapeHtml(email.recipient)}</p>
+                                    <p><strong>📋 主题:</strong> \${escapeHtml(email.subject)}</p>
+                                    <p><strong>🕒 时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
                                 </div>
                                 <div class="email-html-content">
                                     \${email.html_body}
@@ -1341,13 +1632,13 @@ export default {
                         contentHtml = \`
                             <div class="email-detail">
                                 <div class="email-header">
-                                    <p><strong>发件人:</strong> \${escapeHtml(email.sender)}</p>
-                                    <p><strong>收件人:</strong> \${escapeHtml(email.recipient)}</p>
-                                    <p><strong>主题:</strong> \${escapeHtml(email.subject)}</p>
-                                    <p><strong>时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
+                                    <p><strong>📧 发件人:</strong> \${escapeHtml(email.sender)}</p>
+                                    <p><strong>📮 收件人:</strong> \${escapeHtml(email.recipient)}</p>
+                                    <p><strong>📋 主题:</strong> \${escapeHtml(email.subject)}</p>
+                                    <p><strong>🕒 时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
                                 </div>
                                 <div class="email-content">
-                                    \${escapeHtml(email.body || '无内容')}
+                                    \${escapeHtml(email.body || '📭 无内容')}
                                 </div>
                             </div>
                         \`;
@@ -1355,24 +1646,24 @@ export default {
                     
                     contentHtml += \`
                         <div class="email-actions">
-                            <button onclick="replyToEmail('\${escapeHtml(email.sender)}', '\${escapeHtml(email.subject)}')" class="success">回复</button>
+                            <button onclick="replyToEmail('\${escapeHtml(email.sender)}', '\${escapeHtml(email.subject)}')" class="success">📩 回复</button>
                             <button onclick="markEmailRead(\${email.id}, \${email.is_read ? 'false' : 'true'})">
-                                \${email.is_read ? '标记未读' : '标记已读'}
+                                \${email.is_read ? '📨 标记未读' : '📬 标记已读'}
                             </button>
                             \${currentFolder === 3 ? 
-                                '<button onclick="markEmailSpam(' + email.id + ', false)" class="success">不是垃圾邮件</button>' : 
-                                '<button onclick="markEmailSpam(' + email.id + ', true)" class="warning">标记垃圾邮件</button>'
+                                '<button onclick="markEmailSpam(' + email.id + ', false)" class="success">✅ 不是垃圾邮件</button>' : 
+                                '<button onclick="markEmailSpam(' + email.id + ', true)" class="warning">🚫 标记垃圾邮件</button>'
                             }
-                            <button onclick="deleteEmail(\${email.id})" class="danger">删除</button>
+                            <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
                         </div>
                     \`;
                     
                     content.innerHTML = contentHtml;
                 } else {
-                    content.innerHTML = '<p class="error">获取邮件详情失败: ' + result.message + '</p>';
+                    content.innerHTML = '<p class="error">❌ 获取邮件详情失败: ' + result.message + '</p>';
                 }
             } catch (error) {
-                content.innerHTML = '<p class="error">请求失败: ' + error.message + '</p>';
+                content.innerHTML = '<p class="error">❌ 请求失败: ' + error.message + '</p>';
             }
             
             modal.style.display = 'flex';
@@ -1412,7 +1703,7 @@ export default {
             currentFolder = folderId;
             const listId = folderId === 3 ? 'spam-list' : 'inbox-list';
             const listElement = document.getElementById(listId);
-            listElement.innerHTML = '<div class="message">加载中...</div>';
+            listElement.innerHTML = '<div class="message">📨 加载中...</div>';
 
             try {
                 const response = await fetch('/api/emails?folder=' + folderId);
@@ -1426,10 +1717,10 @@ export default {
                     renderEmails(result.emails, listId, folderId);
                     await loadStats();
                 } else {
-                    listElement.innerHTML = '<div class="message error">加载失败: ' + result.message + '</div>';
+                    listElement.innerHTML = '<div class="message error">❌ 加载失败: ' + result.message + '</div>';
                 }
             } catch (error) {
-                listElement.innerHTML = '<div class="message error">请求失败: ' + error.message + '</div>';
+                listElement.innerHTML = '<div class="message error">❌ 请求失败: ' + error.message + '</div>';
             }
         }
         
@@ -1438,7 +1729,7 @@ export default {
             const listElement = document.getElementById(listId);
             
             if (emails.length === 0) {
-                listElement.innerHTML = '<div class="message">该文件夹为空</div>';
+                listElement.innerHTML = '<div class="message">📭 该文件夹为空</div>';
                 return;
             }
 
@@ -1446,21 +1737,31 @@ export default {
             emails.forEach(email => {
                 const emailClass = folderId === 3 ? 'email-item spam' : 
                                  email.is_read ? 'email-item' : 'email-item unread';
+                const previewText = email.body ? 
+                    (email.body.length > 120 ? email.body.substring(0, 120) + '...' : email.body) : 
+                    '📭 无内容';
+                    
                 emailsHTML += \`
                     <div class="\${emailClass}" onclick="showEmailDetail(\${email.id})">
-                        <div class="email-sender"><strong>发件人:</strong> \${escapeHtml(email.sender)}</div>
-                        <div class="email-subject"><strong>主题:</strong> \${escapeHtml(email.subject)}</div>
-                        <div class="email-preview">\${escapeHtml(email.body ? email.body.substring(0, 100) : '无内容')}\${email.body && email.body.length > 100 ? '...' : ''}</div>
-                        <div class="email-date">\${new Date(email.received_at).toLocaleString()}</div>
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
+                            <div style="flex: 1;">
+                                <div style="font-weight: 600; color: #0277bd; margin-bottom: 8px;">\${escapeHtml(email.sender)}</div>
+                                <div style="font-weight: 500; color: #333; margin-bottom: 8px; font-size: 1.1em;">\${escapeHtml(email.subject)}</div>
+                            </div>
+                            <div style="color: #666; font-size: 0.9em; white-space: nowrap; margin-left: 15px;">
+                                \${new Date(email.received_at).toLocaleDateString()}
+                            </div>
+                        </div>
+                        <div style="color: #666; line-height: 1.4; margin-bottom: 15px;">\${escapeHtml(previewText)}</div>
                         <div class="email-actions">
                             <button onclick="event.stopPropagation(); markEmailRead(\${email.id}, \${email.is_read ? 'false' : 'true'})" class="small">
-                                \${email.is_read ? '标记未读' : '标记已读'}
+                                \${email.is_read ? '📨 标记未读' : '📬 标记已读'}
                             </button>
                             \${folderId === 3 ? 
-                                '<button onclick="event.stopPropagation(); markEmailSpam(' + email.id + ', false)" class="small success">不是垃圾邮件</button>' : 
-                                '<button onclick="event.stopPropagation(); markEmailSpam(' + email.id + ', true)" class="small warning">标记垃圾邮件</button>'
+                                '<button onclick="event.stopPropagation(); markEmailSpam(' + email.id + ', false)" class="small success">✅ 不是垃圾邮件</button>' : 
+                                '<button onclick="event.stopPropagation(); markEmailSpam(' + email.id + ', true)" class="small warning">🚫 标记垃圾邮件</button>'
                             }
-                            <button onclick="event.stopPropagation(); deleteEmail(\${email.id})" class="small danger">删除</button>
+                            <button onclick="event.stopPropagation(); deleteEmail(\${email.id})" class="small danger">🗑️ 删除</button>
                         </div>
                     </div>
                 \`;
@@ -1482,10 +1783,10 @@ export default {
                     await loadEmails(currentFolder);
                     closeModal('email-detail-modal');
                 } else {
-                    alert('操作失败: ' + result.message);
+                    alert('❌ 操作失败: ' + result.message);
                 }
             } catch (error) {
-                alert('请求失败: ' + error.message);
+                alert('❌ 请求失败: ' + error.message);
             }
         }
         
@@ -1504,16 +1805,16 @@ export default {
                         showEmailDetail(emailId); // 刷新详情
                     }
                 } else {
-                    alert('操作失败: ' + result.message);
+                    alert('❌ 操作失败: ' + result.message);
                 }
             } catch (error) {
-                alert('请求失败: ' + error.message);
+                alert('❌ 请求失败: ' + error.message);
             }
         }
         
         // 删除邮件
         async function deleteEmail(emailId) {
-            if (!confirm('确定要删除这封邮件吗？')) return;
+            if (!confirm('⚠️ 确定要删除这封邮件吗？')) return;
             
             try {
                 const response = await fetch('/api/emails/delete', {
@@ -1523,14 +1824,14 @@ export default {
                 });
                 const result = await response.json();
                 if (result.success) {
-                    alert(result.message);
+                    alert('✅ ' + result.message);
                     await loadEmails(currentFolder);
                     closeModal('email-detail-modal');
                 } else {
-                    alert('删除失败: ' + result.message);
+                    alert('❌ 删除失败: ' + result.message);
                 }
             } catch (error) {
-                alert('删除请求失败: ' + error.message);
+                alert('❌ 删除请求失败: ' + error.message);
             }
         }
         
@@ -1563,7 +1864,7 @@ export default {
                 const result = await response.json();
                 
                 if (result.success) {
-                    messageDiv.textContent = '登录成功！';
+                    messageDiv.textContent = '✅ 登录成功！';
                     messageDiv.className = 'message success';
                     setTimeout(() => {
                         document.getElementById('login-section').classList.add('hidden');
@@ -1571,11 +1872,11 @@ export default {
                         initializeApp();
                     }, 1000);
                 } else {
-                    messageDiv.textContent = result.message || '登录失败';
+                    messageDiv.textContent = '❌ ' + (result.message || '登录失败');
                     messageDiv.className = 'message error';
                 }
             } catch (error) {
-                messageDiv.textContent = '登录请求失败: ' + error.message;
+                messageDiv.textContent = '❌ 登录请求失败: ' + error.message;
                 messageDiv.className = 'message error';
             }
         }
@@ -1604,7 +1905,7 @@ export default {
             const messageDiv = document.getElementById('send-message');
             
             if (!to || !subject || !body) {
-                messageDiv.textContent = '请填写完整的收件人、主题和内容';
+                messageDiv.textContent = '❌ 请填写完整的收件人、主题和内容';
                 messageDiv.className = 'message error';
                 return;
             }
@@ -1626,18 +1927,18 @@ export default {
                 const result = await response.json();
                 
                 if (result.success) {
-                    messageDiv.textContent = '邮件发送成功!';
+                    messageDiv.textContent = '✅ 邮件发送成功!';
                     messageDiv.className = 'message success';
                     clearForm();
                     setTimeout(() => {
                         messageDiv.textContent = '';
                     }, 3000);
                 } else {
-                    messageDiv.textContent = '发送失败: ' + (result.message || '未知错误');
+                    messageDiv.textContent = '❌ 发送失败: ' + (result.message || '未知错误');
                     messageDiv.className = 'message error';
                 }
             } catch (error) {
-                messageDiv.textContent = '发送请求失败: ' + error.message;
+                messageDiv.textContent = '❌ 发送请求失败: ' + error.message;
                 messageDiv.className = 'message error';
             }
         }
@@ -1651,24 +1952,24 @@ export default {
         
         // 重置数据库
         async function resetDatabase() {
-            if (!confirm('确定要重置数据库吗？这将删除所有数据并重新初始化数据库。此操作不可撤销！')) return;
+            if (!confirm('⚠️ 确定要重置数据库吗？这将删除所有数据并重新初始化数据库。此操作不可撤销！')) return;
             
             try {
                 const response = await fetch('/api/db/reset', { method: 'POST' });
                 const result = await response.json();
                 
                 if (result.success) {
-                    alert('数据库已重置');
+                    alert('✅ 数据库已重置');
                     if (document.getElementById('admin-interface').classList.contains('hidden')) {
                         location.reload();
                     } else {
                         await initializeApp();
                     }
                 } else {
-                    alert('重置失败: ' + (result.message || '未知错误'));
+                    alert('❌ 重置失败: ' + (result.message || '未知错误'));
                 }
             } catch (error) {
-                alert('请求失败: ' + error.message);
+                alert('❌ 请求失败: ' + error.message);
             }
         }
         
