@@ -1,4 +1,4 @@
-﻿// 完整的邮件管理系统 Worker
+﻿// 完整的邮件管理系统 Worker - 修复语法错误版
 export default {
   async email(message, env, ctx) {
     try {
@@ -938,12 +938,7 @@ export default {
             <button onclick="login()">登录</button>
             <div id="login-message" class="message"></div>
             
-            ${!dbStatus.initialized ? `
-            <div class="message warning">
-                <p>数据库未初始化</p>
-                <button onclick="resetDatabase()" class="small">初始化数据库</button>
-            </div>
-            ` : ''}
+            ${!dbStatus.initialized ? '<div class="message warning"><p>数据库未初始化</p><button onclick="resetDatabase()" class="small">初始化数据库</button></div>' : ''}
         </div>
     </div>
 
@@ -1208,9 +1203,9 @@ export default {
             
             folders.forEach(folder => {
                 const folderElement = document.createElement('div');
-                folderElement.className = `folder ${folder.id == currentFolder ? 'active' : ''}`;
+                folderElement.className = 'folder ' + (folder.id == currentFolder ? 'active' : '');
                 folderElement.textContent = folder.name;
-                folderElement.onclick = () => {
+                folderElement.onclick = function() {
                     currentFolder = folder.id;
                     currentPage = 1;
                     document.getElementById('folder-title').textContent = folder.name;
@@ -1238,10 +1233,7 @@ export default {
             customFolders.forEach(folder => {
                 const folderElement = document.createElement('div');
                 folderElement.className = 'folder-item';
-                folderElement.innerHTML = \`
-                    <strong>\${folder.name}</strong>
-                    <button onclick="deleteFolder(\${folder.id})" class="small danger">删除</button>
-                \`;
+                folderElement.innerHTML = '<strong>' + escapeHtml(folder.name) + '</strong><button onclick="deleteFolder(' + folder.id + ')" class="small danger">删除</button>';
                 customFoldersList.appendChild(folderElement);
             });
         }
@@ -1252,7 +1244,7 @@ export default {
             mailList.innerHTML = '<div class="message">加载中...</div>';
             
             try {
-                const response = await fetch(\`/api/emails?folder=\${folderId}&page=\${currentPage}\`);
+                const response = await fetch('/api/emails?folder=' + folderId + '&page=' + currentPage);
                 if (response.status === 401) {
                     logout();
                     return;
@@ -1263,10 +1255,10 @@ export default {
                 if (result.success) {
                     renderEmails(result.emails, result.pagination);
                 } else {
-                    mailList.innerHTML = \`<div class="message error">加载失败: \${result.message || '未知错误'}</div>\`;
+                    mailList.innerHTML = '<div class="message error">加载失败: ' + (result.message || '未知错误') + '</div>';
                 }
             } catch (error) {
-                mailList.innerHTML = \`<div class="message error">请求失败: \${error.message}</div>\`;
+                mailList.innerHTML = '<div class="message error">请求失败: ' + error.message + '</div>';
             }
         }
         
@@ -1280,22 +1272,23 @@ export default {
                 return;
             }
             
-            mailList.innerHTML = emails.map(email => \`
-                <div class="email-item \${email.is_read ? '' : 'unread'}" onclick="viewEmail(\${email.id})">
-                    <div class="email-sender"><strong>发件人:</strong> \${escapeHtml(email.sender)}</div>
-                    <div class="email-subject"><strong>主题:</strong> \${escapeHtml(email.subject)}</div>
-                    <div class="email-preview">\${escapeHtml(email.body ? email.body.substring(0, 100) : '无内容')}\${email.body && email.body.length > 100 ? '...' : ''}</div>
-                    <div class="email-date">\${new Date(email.received_at).toLocaleString()}</div>
-                    <div class="email-actions">
-                        <button onclick="event.stopPropagation(); markEmailRead(\${email.id}, \${email.is_read ? 'false' : 'true'})" class="small">
-                            \${email.is_read ? '标记未读' : '标记已读'}
-                        </button>
-                        <button onclick="event.stopPropagation(); moveEmailPrompt(\${email.id})" class="small">移动到</button>
-                        <button onclick="event.stopPropagation(); deleteEmail(\${email.id})" class="small danger">删除</button>
-                    </div>
-                </div>
-            \`).join('');
+            let emailsHTML = '';
+            emails.forEach(email => {
+                emailsHTML += '<div class="email-item ' + (email.is_read ? '' : 'unread') + '" onclick="viewEmail(' + email.id + ')">';
+                emailsHTML += '<div class="email-sender"><strong>发件人:</strong> ' + escapeHtml(email.sender) + '</div>';
+                emailsHTML += '<div class="email-subject"><strong>主题:</strong> ' + escapeHtml(email.subject) + '</div>';
+                emailsHTML += '<div class="email-preview">' + escapeHtml(email.body ? email.body.substring(0, 100) : '无内容') + (email.body && email.body.length > 100 ? '...' : '') + '</div>';
+                emailsHTML += '<div class="email-date">' + new Date(email.received_at).toLocaleString() + '</div>';
+                emailsHTML += '<div class="email-actions">';
+                emailsHTML += '<button onclick="event.stopPropagation(); markEmailRead(' + email.id + ', ' + (email.is_read ? 'false' : 'true') + ')" class="small">';
+                emailsHTML += (email.is_read ? '标记未读' : '标记已读');
+                emailsHTML += '</button>';
+                emailsHTML += '<button onclick="event.stopPropagation(); moveEmailPrompt(' + email.id + ')" class="small">移动到</button>';
+                emailsHTML += '<button onclick="event.stopPropagation(); deleteEmail(' + email.id + ')" class="small danger">删除</button>';
+                emailsHTML += '</div></div>';
+            });
             
+            mailList.innerHTML = emailsHTML;
             renderPagination(pagination);
         }
         
@@ -1311,7 +1304,7 @@ export default {
                 const prevButton = document.createElement('div');
                 prevButton.className = 'page-btn';
                 prevButton.textContent = '上一页';
-                prevButton.onclick = () => {
+                prevButton.onclick = function() {
                     currentPage--;
                     loadEmails(currentFolder);
                 };
@@ -1321,9 +1314,9 @@ export default {
             // 页码按钮
             for (let i = 1; i <= pagination.totalPages; i++) {
                 const pageButton = document.createElement('div');
-                pageButton.className = \`page-btn \${i === currentPage ? 'active' : ''}\`;
+                pageButton.className = 'page-btn ' + (i === currentPage ? 'active' : '');
                 pageButton.textContent = i;
-                pageButton.onclick = () => {
+                pageButton.onclick = function() {
                     currentPage = i;
                     loadEmails(currentFolder);
                 };
@@ -1335,7 +1328,7 @@ export default {
                 const nextButton = document.createElement('div');
                 nextButton.className = 'page-btn';
                 nextButton.textContent = '下一页';
-                nextButton.onclick = () => {
+                nextButton.onclick = function() {
                     currentPage++;
                     loadEmails(currentFolder);
                 };
@@ -1382,11 +1375,11 @@ export default {
             let folderOptions = '';
             folders.forEach(folder => {
                 if (folder.id != currentFolder) {
-                    folderOptions += \`<option value="\${folder.id}">\${folder.name}</option>\`;
+                    folderOptions += '<option value="' + folder.id + '">' + folder.name + '</option>';
                 }
             });
             
-            const targetFolderId = prompt(\`请选择目标文件夹:\\n\${folderOptions}\`);
+            const targetFolderId = prompt('请选择目标文件夹:\\n' + folderOptions);
             if (targetFolderId) {
                 moveEmail(emailId, parseInt(targetFolderId));
             }
@@ -1421,7 +1414,9 @@ export default {
         }
         
         // 删除邮件
-        async function deleteEmail(emailId, permanent = false) {
+        async function deleteEmail(emailId, permanent) {
+            if (!permanent) permanent = false;
+            
             if (!confirm(permanent ? '确定要永久删除这封邮件吗？此操作不可撤销。' : '确定要删除这封邮件吗？')) return;
             
             try {
@@ -1485,7 +1480,7 @@ export default {
                     messageDiv.textContent = '邮件发送成功!';
                     messageDiv.className = 'message success';
                     clearForm();
-                    setTimeout(() => {
+                    setTimeout(function() {
                         messageDiv.textContent = '';
                     }, 3000);
                 } else {
@@ -1593,12 +1588,7 @@ export default {
             rules.forEach(rule => {
                 const ruleElement = document.createElement('div');
                 ruleElement.className = 'rule-item';
-                ruleElement.innerHTML = \`
-                    <div><strong>\${rule.name}</strong> (\${rule.type}: "\${rule.value}")</div>
-                    <div>操作: \${rule.action === 'move' ? '移动到文件夹' : '直接删除'}\${rule.action === 'move' && rule.target_folder_id ? ' (ID: ' + rule.target_folder_id + ')' : ''}</div>
-                    <div>状态: \${rule.is_active ? '启用' : '禁用'}</div>
-                    <button onclick="deleteRule(\${rule.id})" class="small danger">删除</button>
-                \`;
+                ruleElement.innerHTML = '<div><strong>' + escapeHtml(rule.name) + '</strong> (' + rule.type + ': "' + escapeHtml(rule.value) + '")</div><div>操作: ' + (rule.action === 'move' ? '移动到文件夹' : '直接删除') + (rule.action === 'move' && rule.target_folder_id ? ' (ID: ' + rule.target_folder_id + ')' : '') + '</div><div>状态: ' + (rule.is_active ? '启用' : '禁用') + '</div><button onclick="deleteRule(' + rule.id + ')" class="small danger">删除</button>';
                 rulesList.appendChild(ruleElement);
             });
         }
