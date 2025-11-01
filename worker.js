@@ -1,6 +1,6 @@
-﻿// 综合邮件处理Worker - 修复版 + 玻璃效果界面
+﻿// 综合邮件处理Worker - 修复版 (支持登录状态保持)
 export default {
-  // 处理接收到的邮件
+  // 处理接收到的邮件 (Email Worker功能)
   async email(message, env, ctx) {
     try {
       const from = message.from;
@@ -22,28 +22,66 @@ export default {
     }
   },
 
-  // 处理HTTP请求
+  // 处理HTTP请求 (Web界面和API)
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
     
-    // 处理登录
+    // 登录API
     if (path === "/login" && request.method === "POST") {
       return await this.handleLogin(request, env);
     }
     
+    // 退出登录API
+    if (path === "/logout" && request.method === "POST") {
+      return this.handleLogout();
+    }
+    
     // 获取邮件列表API
     if (path === "/api/emails" && request.method === "GET") {
+      // 验证登录状态
+      const authResult = await this.checkAuth(request, env);
+      if (!authResult.authenticated) {
+        return new Response(JSON.stringify({ success: false, message: "未登录" }), { status: 401 });
+      }
       return await this.getEmails(request, env);
     }
     
     // 发送邮件API
     if (path === "/api/send" && request.method === "POST") {
+      // 验证登录状态
+      const authResult = await this.checkAuth(request, env);
+      if (!authResult.authenticated) {
+        return new Response(JSON.stringify({ success: false, message: "未登录" }), { status: 401 });
+      }
       return await this.sendEmail(request, env);
     }
     
     // 默认返回管理界面
     return this.getAdminInterface(request, env);
+  },
+
+  // 检查认证状态
+  async checkAuth(request, env) {
+    try {
+      const cookieHeader = request.headers.get('Cookie');
+      if (!cookieHeader) return { authenticated: false };
+      
+      const cookies = Object.fromEntries(cookieHeader.split(';').map(c => c.trim().split('=')));
+      const sessionToken = cookies['mail_session'];
+      
+      if (!sessionToken) return { authenticated: false };
+      
+      // 这里简化处理，实际生产环境应该使用更安全的令牌验证机制
+      // 例如，可以将令牌存储在KV中并验证其有效性
+      if (sessionToken === 'authenticated') {
+        return { authenticated: true };
+      }
+      
+      return { authenticated: false };
+    } catch (error) {
+      return { authenticated: false };
+    }
   },
 
   // 处理登录
@@ -56,12 +94,17 @@ export default {
       const ADMIN_PASSWORD = "1591156135qwzxcv";
       
       if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-        return new Response(JSON.stringify({ 
+        // 登录成功，设置Cookie
+        const response = new Response(JSON.stringify({ 
           success: true, 
           message: "登录成功" 
         }), {
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Set-Cookie': `mail_session=authenticated; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400` // 24小时过期
+          }
         });
+        return response;
       } else {
         return new Response(JSON.stringify({ 
           success: false, 
@@ -81,20 +124,30 @@ export default {
     }
   },
 
+  // 处理退出登录
+  handleLogout() {
+    const response = new Response(JSON.stringify({ 
+      success: true, 
+      message: "已退出登录" 
+    }), {
+      headers: { 
+        'Content-Type': 'application/json',
+        'Set-Cookie': `mail_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0` // 立即过期
+      }
+    });
+    return response;
+  },
+
   // 获取邮件列表
   async getEmails(request, env) {
     try {
       console.log("开始查询邮件列表...");
       
-      // 测试数据库连接
-      const testResult = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
-      console.log("数据库表:", testResult);
-      
       const result = await env.DB.prepare(
         "SELECT id, sender, recipient, subject, body, received_at FROM emails ORDER BY received_at DESC LIMIT 100"
       ).all();
       
-      console.log("查询结果:", result);
+      console.log("查询结果数量:", (result.results || []).length);
       
       if (!result.success) {
         throw new Error("数据库查询失败");
@@ -187,7 +240,11 @@ export default {
   },
 
   // 返回管理界面
-  getAdminInterface(request, env) {
+  async getAdminInterface(request, env) {
+    // 检查登录状态
+    const authResult = await this.checkAuth(request, env);
+    const isLoggedIn = authResult.authenticated;
+    
     const html = `
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -244,7 +301,8 @@ export default {
         .content {
             text-align: center;
             max-width: 95%;
-            padding: 30px;
+            width: 100%;
+            padding: 20px;
             background-color: rgba(255, 255, 255, 0.3);
             border-radius: 15px;
             box-shadow: 0 8px 32px rgba(79, 195, 247, 0.3), 0 0 10px rgba(176, 196, 222, 0.2);
@@ -256,6 +314,8 @@ export default {
             transition: transform 1s ease-out, opacity 1s ease-out, filter 1s ease-out;
             position: relative;
             z-index: 1;
+            margin: 10px;
+            box-sizing: border-box;
         }
         .content.loaded {
             transform: scale(1);
@@ -267,7 +327,7 @@ export default {
             box-shadow: 0 12px 40px rgba(79, 195, 247, 0.5), 0 0 20px rgba(176, 196, 222, 0.3);
         }
         h1 {
-            font-size: 2.5rem;
+            font-size: 2rem;
             margin-bottom: 20px;
             color: #0277bd;
             text-shadow: 0 0 5px rgba(79, 195, 247, 0.3);
@@ -276,17 +336,19 @@ export default {
             color: #0277bd;
             margin-bottom: 15px;
             text-shadow: 0 0 5px rgba(79, 195, 247, 0.3);
+            font-size: 1.5rem;
         }
         input, textarea, button {
-            margin: 15px auto;
-            padding: 12px 20px;
+            margin: 10px auto;
+            padding: 12px 15px;
             font-size: 16px;
             border-radius: 25px;
             outline: none;
             display: block;
-            width: 80%;
+            width: 90%;
             max-width: 400px;
             transition: all 0.3s ease;
+            box-sizing: border-box;
         }
         input, textarea {
             background-color: rgba(255, 255, 255, 0.5);
@@ -310,7 +372,6 @@ export default {
             color: #333333;
             cursor: pointer;
             font-weight: bold;
-            text-transform: uppercase;
             letter-spacing: 1px;
         }
         button:hover {
@@ -333,6 +394,7 @@ export default {
             border-radius: 10px;
             border-left: 4px solid #4fc3f7;
             text-align: left;
+            word-break: break-word;
         }
         .email-sender {
             font-weight: bold;
@@ -353,10 +415,12 @@ export default {
             text-align: right;
         }
         .section {
-            margin: 25px 0;
-            padding: 20px;
+            margin: 20px 0;
+            padding: 15px;
             background: rgba(255, 255, 255, 0.2);
             border-radius: 10px;
+            width: 100%;
+            box-sizing: border-box;
         }
         .message {
             padding: 10px;
@@ -374,6 +438,7 @@ export default {
         }
         .form-group {
             margin: 15px 0;
+            text-align: left;
         }
         label {
             display: block;
@@ -381,31 +446,64 @@ export default {
             font-weight: bold;
             color: #0277bd;
         }
+        small {
+            color: #666;
+            font-size: 0.8em;
+        }
+        .sender-display {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 10px 0;
+        }
+        .sender-input {
+            border-radius: 25px 0 0 25px !important;
+            width: 30% !important;
+            margin: 0 !important;
+            text-align: center;
+        }
+        .domain-display {
+            background: rgba(255, 255, 255, 0.5);
+            padding: 12px 15px;
+            border: 1px solid rgba(79, 195, 247, 0.5);
+            border-left: none;
+            border-radius: 0 25px 25px 0;
+            color: #333;
+        }
+        .logout-btn {
+            background: linear-gradient(45deg, #f44336, #e57373) !important;
+            width: auto;
+            padding: 10px 20px;
+            margin-top: 20px;
+        }
+        .hidden {
+            display: none !important;
+        }
         @media (max-width: 768px) {
             .content {
-                max-width: 90%;
-                padding: 20px;
+                max-width: 95%;
+                padding: 15px;
             }
             h1 {
                 font-size: 1.8rem;
             }
+            h2 {
+                font-size: 1.3rem;
+            }
             input, textarea, button {
-                width: 90%;
+                width: 95%;
                 font-size: 14px;
                 padding: 10px;
             }
-        }
-        #login-section, #admin-interface {
-            width: 100%;
-        }
-        .hidden {
-            display: none;
+            .sender-input {
+                width: 40% !important;
+            }
         }
     </style>
 </head>
 <body>
     <!-- 登录页面 -->
-    <div id="login-section" class="content">
+    <div id="login-section" class="content ${isLoggedIn ? 'hidden' : ''}">
         <h1>邮件管理系统</h1>
         <div class="section">
             <h2>管理员登录</h2>
@@ -417,7 +515,7 @@ export default {
     </div>
 
     <!-- 管理主界面 -->
-    <div id="admin-interface" class="content hidden">
+    <div id="admin-interface" class="content ${isLoggedIn ? '' : 'hidden'}">
         <h1>邮件管理系统</h1>
         
         <!-- 邮件列表区域 -->
@@ -433,9 +531,12 @@ export default {
         <div class="section">
             <h2>发送邮件</h2>
             <div class="form-group">
-                <label for="fromUser">发件人别名:</label>
-                <input type="text" id="fromUser" placeholder="sak" value="sak">
-                <small>将作为发件人地址的用户名部分，如: sak@ilqx.dpdns.org</small>
+                <label for="fromUser">发件人:</label>
+                <div class="sender-display">
+                    <input type="text" id="fromUser" class="sender-input" placeholder="sak" value="sak">
+                    <div class="domain-display">@ilqx.dpdns.org</div>
+                </div>
+                <small>自定义发件人名称部分</small>
             </div>
             <div class="form-group">
                 <label for="to">收件人:</label>
@@ -454,10 +555,25 @@ export default {
             <div id="send-message" class="message"></div>
         </div>
 
-        <button onclick="logout()" style="background: linear-gradient(45deg, #f44336, #e57373);">退出登录</button>
+        <button onclick="logout()" class="logout-btn">退出登录</button>
     </div>
 
     <script>
+        // 页面加载动画
+        document.addEventListener('DOMContentLoaded', function() {
+            var contents = document.querySelectorAll('.content');
+            setTimeout(function() {
+                contents.forEach(content => {
+                    content.classList.add('loaded');
+                });
+            }, 100);
+            
+            // 如果已登录，自动加载邮件列表
+            if (document.getElementById('admin-interface').classList.contains('hidden') === false) {
+                loadEmails();
+            }
+        });
+
         // 登录函数
         async function login() {
             const username = document.getElementById('username').value;
@@ -494,11 +610,23 @@ export default {
         }
 
         // 退出登录
-        function logout() {
-            document.getElementById('admin-interface').classList.add('hidden');
-            document.getElementById('login-section').classList.remove('hidden');
-            document.getElementById('password').value = '1591156135qwzxcv';
-            document.getElementById('login-message').textContent = '';
+        async function logout() {
+            try {
+                const response = await fetch('/logout', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('admin-interface').classList.add('hidden');
+                    document.getElementById('login-section').classList.remove('hidden');
+                    document.getElementById('password').value = '1591156135qwzxcv';
+                    document.getElementById('login-message').textContent = '';
+                }
+            } catch (error) {
+                console.error('退出登录错误:', error);
+                // 即使请求失败，也强制前端退出
+                document.getElementById('admin-interface').classList.add('hidden');
+                document.getElementById('login-section').classList.remove('hidden');
+            }
         }
 
         // 加载邮件列表
@@ -507,6 +635,12 @@ export default {
             
             try {
                 const response = await fetch('/api/emails');
+                if (response.status === 401) {
+                    // 未登录，显示登录界面
+                    logout();
+                    return;
+                }
+                
                 const result = await response.json();
                 
                 if (result.success) {
@@ -554,6 +688,12 @@ export default {
                     body: JSON.stringify({ to, subject, text: body, fromUser })
                 });
                 
+                if (response.status === 401) {
+                    // 未登录，显示登录界面
+                    logout();
+                    return;
+                }
+                
                 const result = await response.json();
                 
                 if (result.success) {
@@ -587,21 +727,6 @@ export default {
             div.textContent = text;
             return div.innerHTML;
         }
-
-        // 页面加载动画
-        document.addEventListener('DOMContentLoaded', function() {
-            var contents = document.querySelectorAll('.content');
-            setTimeout(function() {
-                contents.forEach(content => {
-                    content.classList.add('loaded');
-                });
-            }, 100);
-            
-            // 自动填充测试数据（可选）
-            document.getElementById('to').value = 'test@example.com';
-            document.getElementById('subject').value = '测试邮件';
-            document.getElementById('body').value = '这是一封测试邮件内容。';
-        });
     </script>
 </body>
 </html>
