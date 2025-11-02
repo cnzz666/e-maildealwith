@@ -1,4 +1,4 @@
-﻿// 完整的邮件管理系统 - 修复内容读取 + 移动端优化
+﻿// 完整的邮件管理系统 - 修复内容解析 + 完整文件夹功能
 export default {
   async email(message, env, ctx) {
     try {
@@ -16,26 +16,40 @@ export default {
       // 改进的邮件内容获取方式
       let text = '';
       let html = '';
+      let rawData = '';
       
       try {
-        // 尝试多种方式获取邮件内容
+        // 首先尝试获取原始数据
+        const raw = await message.raw;
+        if (raw) {
+          rawData = new TextDecoder().decode(raw);
+          console.log('原始数据长度:', rawData.length);
+        }
+      } catch (e) {
+        console.log('获取原始数据失败:', e.message);
+      }
+      
+      try {
+        // 尝试获取文本内容
         text = await message.text();
         if (!text || text.trim() === '') {
-          // 如果text为空，尝试从raw获取
-          const raw = await message.raw;
-          if (raw) {
-            text = new TextDecoder().decode(raw);
-            // 简单清理，只保留文本部分
-            text = text.replace(/<[^>]*>/g, '').substring(0, 10000);
+          // 如果text为空，从原始数据提取文本
+          if (rawData) {
+            // 简单的文本提取：移除HTML标签，保留纯文本
+            text = rawData.replace(/<[^>]*>/g, '')
+                         .replace(/\n\s*\n/g, '\n\n')
+                         .substring(0, 10000)
+                         .trim();
           }
         }
         console.log('文本内容长度:', text.length);
       } catch (e) {
         console.log('获取文本内容失败:', e.message);
-        text = '邮件内容解析失败，原始数据已保存';
+        text = '邮件内容解析失败，请查看原始数据';
       }
       
       try {
+        // 尝试获取HTML内容
         html = await message.html();
         console.log('HTML内容长度:', html?.length || 0);
       } catch (e) {
@@ -45,31 +59,30 @@ export default {
       
       // 如果内容都为空，保存原始数据
       if ((!text || text.trim() === '') && (!html || html.trim() === '')) {
-        try {
-          const raw = await message.raw;
-          text = new TextDecoder().decode(raw).substring(0, 5000);
-        } catch (e) {
-          text = '无法读取邮件内容 - 原始数据获取失败';
-        }
+        text = rawData ? rawData.substring(0, 5000) : '无法读取邮件内容 - 原始数据获取失败';
       }
+      
+      // 保存原始数据用于调试
+      const rawContent = rawData.substring(0, 10000);
       
       // 检查拦截规则
       const shouldBlock = await checkBlockRules(from, subject, text, env);
       if (shouldBlock) {
         console.log(`🚫 邮件被拦截: ${from} -> ${to}`);
-        await saveEmailToDatabase(env, from, to, subject, text, html, 3, 1);
+        await saveEmailToDatabase(env, from, to, subject, text, html, 3, 1, rawContent);
         return;
       }
       
       // 存储邮件到数据库 - 收件箱
-      await saveEmailToDatabase(env, from, to, subject, text, html, 1, 0);
+      await saveEmailToDatabase(env, from, to, subject, text, html, 1, 0, rawContent);
       
       console.log('✅ 邮件处理完成');
       
     } catch (error) {
       console.error('❌ 处理邮件时出错:', error);
       try {
-        await saveEmailToDatabase(env, message.from, message.to, "处理错误的邮件", "邮件处理过程中发生错误: " + error.message, "", 3, 1);
+        await saveEmailToDatabase(env, message.from, message.to, "处理错误的邮件", 
+          "邮件处理过程中发生错误: " + error.message, "", 3, 1, '');
       } catch (e) {
         console.error('连错误邮件都无法存储:', e);
       }
@@ -107,6 +120,7 @@ export default {
       'POST:/api/db/reset': () => this.resetDatabase(request, env),
       'GET:/api/stats': () => this.getStats(request, env),
       'GET:/api/debug': () => this.getDebugInfo(request, env),
+      'GET:/api/blocked': () => this.getBlockedEmails(request, env),
     };
     
     const routeKey = `${request.method}:${path}`;
@@ -121,6 +135,57 @@ export default {
     }
     
     return this.getAdminInterface(request, env);
+  },
+
+  // 获取被拦截的邮件
+  async getBlockedEmails(request, env) {
+    try {
+      const url = new URL(request.url);
+      const page = parseInt(url.searchParams.get('page')) || 1;
+      const limit = 20;
+      const offset = (page - 1) * limit;
+      
+      // 获取被拦截邮件总数
+      const countResult = await env.DB.prepare(
+        "SELECT COUNT(*) as total FROM emails WHERE folder_id = 3 AND is_spam = 1 AND is_deleted = 0"
+      ).first();
+      
+      // 获取被拦截邮件列表
+      const result = await env.DB.prepare(
+        `SELECT e.id, e.sender, e.recipient, e.subject, e.body, e.html_body, 
+                e.is_read, e.has_attachments, e.received_at, e.raw_content,
+                f.name as folder_name
+         FROM emails e 
+         LEFT JOIN folders f ON e.folder_id = f.id 
+         WHERE e.folder_id = 3 AND e.is_spam = 1 AND e.is_deleted = 0 
+         ORDER BY e.received_at DESC 
+         LIMIT ? OFFSET ?`
+      ).bind(limit, offset).all();
+      
+      return new Response(JSON.stringify({
+        success: true,
+        emails: result.results || [],
+        pagination: {
+          page,
+          limit,
+          total: countResult?.total || 0,
+          totalPages: Math.ceil((countResult?.total || 0) / limit)
+        }
+      }), {
+        headers: { 
+          'Content-Type': 'application/json'
+        }
+      });
+    } catch (error) {
+      console.error("获取被拦截邮件错误:", error);
+      return new Response(JSON.stringify({ 
+        success: false, 
+        message: "获取被拦截邮件失败: " + error.message 
+      }), { 
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
   },
 
   // 获取邮件详情
@@ -157,8 +222,10 @@ export default {
         });
       }
       
-      // 标记为已读
-      await env.DB.prepare("UPDATE emails SET is_read = 1 WHERE id = ?").bind(emailId).run();
+      // 如果不是已读，标记为已读
+      if (!email.is_read) {
+        await env.DB.prepare("UPDATE emails SET is_read = 1 WHERE id = ?").bind(emailId).run();
+      }
       
       return new Response(JSON.stringify({
         success: true,
@@ -193,12 +260,21 @@ export default {
         "SELECT id, name FROM folders"
       ).all();
       
+      // 获取各文件夹邮件数量
+      const folderStats = await env.DB.prepare(
+        `SELECT f.id, f.name, COUNT(e.id) as count 
+         FROM folders f 
+         LEFT JOIN emails e ON f.id = e.folder_id AND e.is_deleted = 0 
+         GROUP BY f.id, f.name`
+      ).all();
+      
       return new Response(JSON.stringify({
         success: true,
         debug: {
           tables: tables.results,
           emailCount: emailCount?.count || 0,
           folders: folders.results,
+          folderStats: folderStats.results,
           timestamp: new Date().toISOString()
         }
       }), {
@@ -305,7 +381,8 @@ export default {
       // 获取邮件列表
       const result = await env.DB.prepare(
         `SELECT e.id, e.sender, e.recipient, e.subject, e.body, e.html_body, 
-                e.is_read, e.has_attachments, e.received_at, f.name as folder_name
+                e.is_read, e.has_attachments, e.received_at, e.raw_content,
+                f.name as folder_name
          FROM emails e 
          LEFT JOIN folders f ON e.folder_id = f.id 
          WHERE e.folder_id = ? AND e.is_deleted = 0 
@@ -465,7 +542,7 @@ export default {
       
       if (resendResponse.ok) {
         // 将发送的邮件保存到已发送文件夹
-        await saveEmailToDatabase(env, from, to, subject, text, "", 2, 0);
+        await saveEmailToDatabase(env, from, to, subject, text, "", 2, 0, '');
         
         return new Response(JSON.stringify({ 
           success: true, 
@@ -697,12 +774,22 @@ export default {
         "SELECT COUNT(*) as spam FROM emails WHERE folder_id = 3 AND is_deleted = 0"
       ).first();
       
+      const sentResult = await env.DB.prepare(
+        "SELECT COUNT(*) as sent FROM emails WHERE folder_id = 2 AND is_deleted = 0"
+      ).first();
+      
+      const blockedResult = await env.DB.prepare(
+        "SELECT COUNT(*) as blocked FROM emails WHERE folder_id = 3 AND is_spam = 1 AND is_deleted = 0"
+      ).first();
+      
       return new Response(JSON.stringify({
         success: true,
         stats: {
           total: totalResult?.total || 0,
           unread: unreadResult?.unread || 0,
-          spam: spamResult?.spam || 0
+          spam: spamResult?.spam || 0,
+          sent: sentResult?.sent || 0,
+          blocked: blockedResult?.blocked || 0
         }
       }), {
         headers: { 'Content-Type': 'application/json' }
@@ -1030,6 +1117,19 @@ export default {
             overflow-y: auto;
             border: 1px solid rgba(255, 255, 255, 0.4);
             box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        .raw-content {
+            background: rgba(0, 0, 0, 0.05);
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid rgba(0, 0, 0, 0.1);
         }
         
         /* 统计信息样式 */
@@ -1466,15 +1566,25 @@ export default {
                 <p id="unread-emails">0</p>
             </div>
             <div class="stat-card">
+                <h3>📤 已发送</h3>
+                <p id="sent-emails">0</p>
+            </div>
+            <div class="stat-card">
                 <h3>🚫 垃圾邮件</h3>
                 <p id="spam-emails">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>🛡️ 被拦截</h3>
+                <p id="blocked-emails">0</p>
             </div>
         </div>
 
         <div class="tabs">
             <div class="tab active" onclick="showTab('inbox')">📥 收件箱</div>
+            <div class="tab" onclick="showTab('sent')">📤 已发送</div>
             <div class="tab" onclick="showTab('spam')">🚫 垃圾邮件</div>
-            <div class="tab" onclick="showTab('send')">📤 发送邮件</div>
+            <div class="tab" onclick="showTab('blocked')">🛡️ 被拦截邮件</div>
+            <div class="tab" onclick="showTab('send')">📝 发送邮件</div>
             <div class="tab" onclick="showTab('settings')">⚙️ 设置</div>
         </div>
 
@@ -1489,12 +1599,34 @@ export default {
             </div>
         </div>
 
+        <!-- 已发送 -->
+        <div id="tab-sent" class="tab-content hidden">
+            <div class="section">
+                <h2>📤 已发送邮件</h2>
+                <button onclick="loadEmails(2)">🔄 刷新已发送邮件</button>
+                <div id="sent-list" class="email-list">
+                    <div class="message">📨 加载中...</div>
+                </div>
+            </div>
+        </div>
+
         <!-- 垃圾邮件 -->
         <div id="tab-spam" class="tab-content hidden">
             <div class="section">
                 <h2>🚫 垃圾邮件</h2>
                 <button onclick="loadEmails(3)">🔄 刷新垃圾邮件</button>
                 <div id="spam-list" class="email-list">
+                    <div class="message">📨 加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 被拦截邮件 -->
+        <div id="tab-blocked" class="tab-content hidden">
+            <div class="section">
+                <h2>🛡️ 被拦截邮件</h2>
+                <button onclick="loadBlockedEmails()">🔄 刷新被拦截邮件</button>
+                <div id="blocked-list" class="email-list">
                     <div class="message">📨 加载中...</div>
                 </div>
             </div>
@@ -1581,6 +1713,10 @@ export default {
                             <p><strong>数据库表:</strong> \${JSON.stringify(result.debug.tables.map(t => t.name))}</p>
                             <p><strong>邮件总数:</strong> \${result.debug.emailCount}</p>
                             <p><strong>文件夹:</strong> \${JSON.stringify(result.debug.folders.map(f => f.name))}</p>
+                            <p><strong>文件夹统计:</strong></p>
+                            <ul>
+                                \${result.debug.folderStats.map(f => \`<li>\${f.name}: \${f.count} 封邮件</li>\`).join('')}
+                            </ul>
                             <p><strong>更新时间:</strong> \${new Date(result.debug.timestamp).toLocaleString()}</p>
                         </div>
                         <button onclick="resetDatabase()" class="danger small">🔄 重置数据库</button>
@@ -1614,6 +1750,9 @@ export default {
                     const email = result.email;
                     let contentHtml = '';
                     
+                    // 检查是否解析失败
+                    const isParseFailed = email.body && email.body.includes('邮件内容解析失败');
+                    
                     if (email.html_body && email.html_body.trim() !== '') {
                         contentHtml = \`
                             <div class="email-detail">
@@ -1622,10 +1761,17 @@ export default {
                                     <p><strong>📮 收件人:</strong> \${escapeHtml(email.recipient)}</p>
                                     <p><strong>📋 主题:</strong> \${escapeHtml(email.subject)}</p>
                                     <p><strong>🕒 时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
+                                    <p><strong>📁 文件夹:</strong> \${escapeHtml(email.folder_name)}</p>
                                 </div>
                                 <div class="email-html-content">
                                     \${email.html_body}
                                 </div>
+                                \${isParseFailed ? \`
+                                    <div style="margin-top: 20px;">
+                                        <h4>📄 原始数据:</h4>
+                                        <div class="raw-content">\${escapeHtml(email.raw_content || '无原始数据')}</div>
+                                    </div>
+                                \` : ''}
                             </div>
                         \`;
                     } else {
@@ -1636,27 +1782,61 @@ export default {
                                     <p><strong>📮 收件人:</strong> \${escapeHtml(email.recipient)}</p>
                                     <p><strong>📋 主题:</strong> \${escapeHtml(email.subject)}</p>
                                     <p><strong>🕒 时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
+                                    <p><strong>📁 文件夹:</strong> \${escapeHtml(email.folder_name)}</p>
                                 </div>
                                 <div class="email-content">
                                     \${escapeHtml(email.body || '📭 无内容')}
                                 </div>
+                                \${isParseFailed ? \`
+                                    <div style="margin-top: 20px;">
+                                        <h4>📄 原始数据:</h4>
+                                        <div class="raw-content">\${escapeHtml(email.raw_content || '无原始数据')}</div>
+                                    </div>
+                                \` : ''}
                             </div>
                         \`;
                     }
                     
-                    contentHtml += \`
-                        <div class="email-actions">
-                            <button onclick="replyToEmail('\${escapeHtml(email.sender)}', '\${escapeHtml(email.subject)}')" class="success">📩 回复</button>
-                            <button onclick="markEmailRead(\${email.id}, \${email.is_read ? 'false' : 'true'})">
-                                \${email.is_read ? '📨 标记未读' : '📬 标记已读'}
-                            </button>
-                            \${currentFolder === 3 ? 
-                                '<button onclick="markEmailSpam(' + email.id + ', false)" class="success">✅ 不是垃圾邮件</button>' : 
-                                '<button onclick="markEmailSpam(' + email.id + ', true)" class="warning">🚫 标记垃圾邮件</button>'
-                            }
-                            <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
-                        </div>
+                    // 操作按钮
+                    let actionButtons = \`
+                        <button onclick="markEmailRead(\${email.id}, \${email.is_read ? 'false' : 'true'})">
+                            \${email.is_read ? '📨 标记未读' : '📬 标记已读'}
+                        </button>
                     \`;
+                    
+                    if (currentFolder === 1) {
+                        // 收件箱操作
+                        actionButtons += \`
+                            <button onclick="markEmailSpam(\${email.id}, true)" class="warning">🚫 标记垃圾邮件</button>
+                            <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
+                        \`;
+                    } else if (currentFolder === 3) {
+                        // 垃圾邮件操作
+                        actionButtons += \`
+                            <button onclick="markEmailSpam(\${email.id}, false)" class="success">✅ 不是垃圾邮件</button>
+                            <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
+                        \`;
+                    } else if (currentFolder === 2) {
+                        // 已发送操作
+                        actionButtons += \`
+                            <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
+                        \`;
+                    } else if (currentFolder === 'blocked') {
+                        // 被拦截邮件操作
+                        actionButtons += \`
+                            <button onclick="markEmailSpam(\${email.id}, false)" class="success">✅ 移回收件箱</button>
+                            <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
+                        \`;
+                    }
+                    
+                    // 如果不是已发送邮件，添加回复按钮
+                    if (currentFolder !== 2) {
+                        actionButtons = \`
+                            <button onclick="replyToEmail('\${escapeHtml(email.sender)}', '\${escapeHtml(email.subject)}')" class="success">📩 回复</button>
+                        \` + actionButtons;
+                    }
+                    
+                    contentHtml += \`<div class="email-actions">\${actionButtons}</div>\`;
                     
                     content.innerHTML = contentHtml;
                 } else {
@@ -1691,7 +1871,9 @@ export default {
                 if (result.success) {
                     document.getElementById('total-emails').textContent = result.stats.total;
                     document.getElementById('unread-emails').textContent = result.stats.unread;
+                    document.getElementById('sent-emails').textContent = result.stats.sent;
                     document.getElementById('spam-emails').textContent = result.stats.spam;
+                    document.getElementById('blocked-emails').textContent = result.stats.blocked;
                 }
             } catch (error) {
                 console.error('加载统计失败:', error);
@@ -1701,7 +1883,15 @@ export default {
         // 加载邮件列表
         async function loadEmails(folderId) {
             currentFolder = folderId;
-            const listId = folderId === 3 ? 'spam-list' : 'inbox-list';
+            let listId;
+            
+            switch(folderId) {
+                case 1: listId = 'inbox-list'; break;
+                case 2: listId = 'sent-list'; break;
+                case 3: listId = 'spam-list'; break;
+                default: listId = 'inbox-list';
+            }
+            
             const listElement = document.getElementById(listId);
             listElement.innerHTML = '<div class="message">📨 加载中...</div>';
 
@@ -1724,6 +1914,31 @@ export default {
             }
         }
         
+        // 加载被拦截邮件
+        async function loadBlockedEmails() {
+            currentFolder = 'blocked';
+            const listElement = document.getElementById('blocked-list');
+            listElement.innerHTML = '<div class="message">📨 加载中...</div>';
+
+            try {
+                const response = await fetch('/api/blocked');
+                if (response.status === 401) {
+                    logout();
+                    return;
+                }
+                const result = await response.json();
+                
+                if (result.success) {
+                    renderEmails(result.emails, 'blocked-list', 'blocked');
+                    await loadStats();
+                } else {
+                    listElement.innerHTML = '<div class="message error">❌ 加载失败: ' + result.message + '</div>';
+                }
+            } catch (error) {
+                listElement.innerHTML = '<div class="message error">❌ 请求失败: ' + error.message + '</div>';
+            }
+        }
+        
         // 渲染邮件列表
         function renderEmails(emails, listId, folderId) {
             const listElement = document.getElementById(listId);
@@ -1735,8 +1950,15 @@ export default {
 
             let emailsHTML = '';
             emails.forEach(email => {
-                const emailClass = folderId === 3 ? 'email-item spam' : 
-                                 email.is_read ? 'email-item' : 'email-item unread';
+                let emailClass = 'email-item';
+                if (folderId === 1 && !email.is_read) {
+                    emailClass += ' unread';
+                } else if (folderId === 3) {
+                    emailClass += ' spam';
+                } else if (folderId === 'blocked') {
+                    emailClass += ' blocked';
+                }
+                
                 const previewText = email.body ? 
                     (email.body.length > 120 ? email.body.substring(0, 120) + '...' : email.body) : 
                     '📭 无内容';
@@ -1757,17 +1979,42 @@ export default {
                             <button onclick="event.stopPropagation(); markEmailRead(\${email.id}, \${email.is_read ? 'false' : 'true'})" class="small">
                                 \${email.is_read ? '📨 标记未读' : '📬 标记已读'}
                             </button>
-                            \${folderId === 3 ? 
-                                '<button onclick="event.stopPropagation(); markEmailSpam(' + email.id + ', false)" class="small success">✅ 不是垃圾邮件</button>' : 
-                                '<button onclick="event.stopPropagation(); markEmailSpam(' + email.id + ', true)" class="small warning">🚫 标记垃圾邮件</button>'
-                            }
-                            <button onclick="event.stopPropagation(); deleteEmail(\${email.id})" class="small danger">🗑️ 删除</button>
+                            \${getFolderActionButtons(folderId, email.id)}
                         </div>
                     </div>
                 \`;
             });
             
             listElement.innerHTML = emailsHTML;
+        }
+        
+        // 获取文件夹特定的操作按钮
+        function getFolderActionButtons(folderId, emailId) {
+            switch(folderId) {
+                case 1: // 收件箱
+                    return \`
+                        <button onclick="event.stopPropagation(); markEmailSpam(\${emailId}, true)" class="small warning">🚫 标记垃圾邮件</button>
+                        <button onclick="event.stopPropagation(); deleteEmail(\${emailId})" class="small danger">🗑️ 删除</button>
+                    \`;
+                case 2: // 已发送
+                    return \`
+                        <button onclick="event.stopPropagation(); deleteEmail(\${emailId})" class="small danger">🗑️ 删除</button>
+                    \`;
+                case 3: // 垃圾邮件
+                    return \`
+                        <button onclick="event.stopPropagation(); markEmailSpam(\${emailId}, false)" class="small success">✅ 不是垃圾邮件</button>
+                        <button onclick="event.stopPropagation(); deleteEmail(\${emailId})" class="small danger">🗑️ 删除</button>
+                    \`;
+                case 'blocked': // 被拦截邮件
+                    return \`
+                        <button onclick="event.stopPropagation(); markEmailSpam(\${emailId}, false)" class="small success">✅ 移回收件箱</button>
+                        <button onclick="event.stopPropagation(); deleteEmail(\${emailId})" class="small danger">🗑️ 删除</button>
+                    \`;
+                default:
+                    return \`
+                        <button onclick="event.stopPropagation(); deleteEmail(\${emailId})" class="small danger">🗑️ 删除</button>
+                    \`;
+            }
         }
         
         // 标记垃圾邮件
@@ -1780,8 +2027,13 @@ export default {
                 });
                 const result = await response.json();
                 if (result.success) {
-                    await loadEmails(currentFolder);
+                    if (currentFolder === 'blocked') {
+                        await loadBlockedEmails();
+                    } else {
+                        await loadEmails(currentFolder);
+                    }
                     closeModal('email-detail-modal');
+                    await loadStats();
                 } else {
                     alert('❌ 操作失败: ' + result.message);
                 }
@@ -1800,10 +2052,15 @@ export default {
                 });
                 const result = await response.json();
                 if (result.success) {
-                    await loadEmails(currentFolder);
+                    if (currentFolder === 'blocked') {
+                        await loadBlockedEmails();
+                    } else {
+                        await loadEmails(currentFolder);
+                    }
                     if (document.getElementById('email-detail-modal').style.display === 'flex') {
                         showEmailDetail(emailId); // 刷新详情
                     }
+                    await loadStats();
                 } else {
                     alert('❌ 操作失败: ' + result.message);
                 }
@@ -1825,8 +2082,13 @@ export default {
                 const result = await response.json();
                 if (result.success) {
                     alert('✅ ' + result.message);
-                    await loadEmails(currentFolder);
+                    if (currentFolder === 'blocked') {
+                        await loadBlockedEmails();
+                    } else {
+                        await loadEmails(currentFolder);
+                    }
                     closeModal('email-detail-modal');
+                    await loadStats();
                 } else {
                     alert('❌ 删除失败: ' + result.message);
                 }
@@ -1843,7 +2105,9 @@ export default {
             event.target.classList.add('active');
             
             if (tabName === 'inbox') loadEmails(1);
+            if (tabName === 'sent') loadEmails(2);
             if (tabName === 'spam') loadEmails(3);
+            if (tabName === 'blocked') loadBlockedEmails();
         }
         
         // 登录
@@ -1933,6 +2197,7 @@ export default {
                     setTimeout(() => {
                         messageDiv.textContent = '';
                     }, 3000);
+                    await loadStats();
                 } else {
                     messageDiv.textContent = '❌ 发送失败: ' + (result.message || '未知错误');
                     messageDiv.className = 'message error';
@@ -2013,7 +2278,7 @@ async function initializeDatabase(env) {
       )
     `).run();
     
-    // 创建邮件表
+    // 创建邮件表 - 增加raw_content字段
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS emails (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2022,6 +2287,7 @@ async function initializeDatabase(env) {
         subject TEXT,
         body TEXT,
         html_body TEXT,
+        raw_content TEXT,
         is_read BOOLEAN DEFAULT 0,
         is_spam BOOLEAN DEFAULT 0,
         is_deleted BOOLEAN DEFAULT 0,
@@ -2079,13 +2345,13 @@ async function initializeDatabase(env) {
 }
 
 // 保存邮件到数据库的辅助函数
-async function saveEmailToDatabase(env, from, to, subject, text, html, folderId, isSpam) {
+async function saveEmailToDatabase(env, from, to, subject, text, html, folderId, isSpam, rawContent) {
   try {
     console.log('保存邮件到数据库...', { from, to, subject: subject.substring(0, 50), folderId, isSpam });
     
     const result = await env.DB.prepare(
-      "INSERT INTO emails (sender, recipient, subject, body, html_body, folder_id, is_spam, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    ).bind(from, to, subject, text, html || '', folderId, isSpam, new Date().toISOString()).run();
+      "INSERT INTO emails (sender, recipient, subject, body, html_body, raw_content, folder_id, is_spam, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(from, to, subject, text, html || '', rawContent || '', folderId, isSpam, new Date().toISOString()).run();
     
     console.log('✅ 邮件保存成功，ID:', result.meta.last_row_id);
     return result;
