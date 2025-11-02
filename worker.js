@@ -1,4 +1,4 @@
-﻿// 完整的邮件管理系统 - 修复内容解析 + 完整拦截规则 + 文件夹管理
+﻿// 完整的邮件管理系统 - 修复原始数据保存和解析问题
 export default {
   async email(message, env, ctx) {
     try {
@@ -13,26 +13,59 @@ export default {
       
       console.log('邮件信息:', { from, to, subject });
       
-      // 解析邮件内容
-      const { text, html, rawContent } = await parseEmailContent(message);
+      // 直接获取原始数据并保存
+      let rawContent = '';
+      let text = '';
+      let html = '';
+      
+      try {
+        // 强制获取原始数据
+        const raw = await message.raw;
+        if (raw && raw.byteLength > 0) {
+          rawContent = new TextDecoder().decode(raw);
+          console.log('✅ 原始数据获取成功，长度:', rawContent.length);
+          
+          // 尝试从原始数据提取文本内容
+          text = extractTextFromRawEmail(rawContent);
+          console.log('从原始数据提取文本长度:', text.length);
+        } else {
+          console.log('❌ 原始数据为空');
+          rawContent = '原始数据为空';
+        }
+      } catch (e) {
+        console.log('获取原始数据失败:', e.message);
+        rawContent = '获取原始数据失败: ' + e.message;
+      }
+      
+      // 尝试获取格式化内容（但不依赖它）
+      try {
+        const formattedText = await message.text();
+        if (formattedText && formattedText.trim() !== '') {
+          text = formattedText;
+          console.log('使用格式化文本，长度:', text.length);
+        }
+      } catch (e) {
+        console.log('获取格式化文本失败:', e.message);
+      }
+      
+      try {
+        html = await message.html();
+        console.log('HTML内容长度:', html?.length || 0);
+      } catch (e) {
+        console.log('获取HTML内容失败:', e.message);
+        html = '';
+      }
+      
+      // 如果内容都为空，使用原始数据作为文本
+      if ((!text || text.trim() === '') && (!html || html.trim() === '')) {
+        text = rawContent.substring(0, 5000) || '邮件内容为空';
+      }
       
       // 检查拦截规则
-      const blockResult = await checkBlockRules(from, subject, text + ' ' + html, env);
-      
-      if (blockResult.blocked) {
-        console.log(`🚫 邮件被拦截: ${from} -> ${to}, 规则: ${blockResult.ruleName}`);
-        
-        let targetFolderId = blockResult.targetFolderId || 3; // 默认垃圾邮件文件夹
-        let isSpam = 1;
-        
-        if (blockResult.action === 'delete') {
-          targetFolderId = 4; // 已删除文件夹
-        } else if (blockResult.action === 'inbox') {
-          targetFolderId = 1; // 收件箱
-          isSpam = 0;
-        }
-        
-        await saveEmailToDatabase(env, from, to, subject, text, html, targetFolderId, isSpam, rawContent, blockResult.ruleId);
+      const shouldBlock = await checkBlockRules(from, subject, text, env);
+      if (shouldBlock) {
+        console.log(`🚫 邮件被拦截: ${from} -> ${to}`);
+        await saveEmailToDatabase(env, from, to, subject, text, html, 3, 1, rawContent);
         return;
       }
       
@@ -47,7 +80,7 @@ export default {
         await saveEmailToDatabase(env, message.from, message.to, 
           "处理错误的邮件", 
           "邮件处理过程中发生错误: " + error.message, 
-          "", 3, 1, '');
+          "", 3, 1, '错误详情: ' + error.stack);
       } catch (e) {
         console.error('连错误邮件都无法存储:', e);
       }
@@ -88,11 +121,12 @@ export default {
       'GET:/api/stats': () => this.getStats(request, env),
       'GET:/api/debug': () => this.getDebugInfo(request, env),
       'GET:/api/blocked': () => this.getBlockedEmails(request, env),
+      'POST:/api/parse-raw': () => this.parseRawEmail(request, env),
     };
     
     const routeKey = `${request.method}:${path}`;
     if (routes[routeKey]) {
-      if (!['POST:/login', 'POST:/api/db/reset', 'GET:/api/debug'].includes(routeKey)) {
+      if (!['POST:/login', 'POST:/api/db/reset', 'GET:/api/debug', 'POST:/api/parse-raw'].includes(routeKey)) {
         const authResult = await this.checkAuth(request, env);
         if (!authResult.authenticated) {
           return new Response(JSON.stringify({ success: false, message: "未登录" }), { status: 401 });
@@ -102,6 +136,42 @@ export default {
     }
     
     return this.getAdminInterface(request, env);
+  },
+
+  // 解析原始邮件数据
+  async parseRawEmail(request, env) {
+    try {
+      const { rawContent } = await request.json();
+      
+      if (!rawContent) {
+        return new Response(JSON.stringify({ 
+          success: false, 
+          message: "原始数据不能为空" 
+        }), { 
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // 从原始数据中提取可读内容
+      const parsedContent = extractReadableContent(rawContent);
+      
+      return new Response(JSON.stringify({
+        success: true,
+        content: parsedContent
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      console.error("解析原始邮件错误:", error);
+      return new Response(JSON.stringify({ 
+        success: false, 
+        message: "解析原始邮件失败: " + error.message 
+      }), { 
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
   },
 
   // 获取文件夹树形结构
@@ -226,6 +296,12 @@ export default {
         });
       }
       
+      // 检查是否需要重新解析内容
+      let needsReparsing = false;
+      if ((!email.body || email.body.includes('邮件内容解析失败') || email.body.includes('无法解析邮件内容')) && email.raw_content) {
+        needsReparsing = true;
+      }
+      
       // 如果不是已读，标记为已读
       if (!email.is_read) {
         await env.DB.prepare("UPDATE emails SET is_read = 1 WHERE id = ?").bind(emailId).run();
@@ -233,7 +309,8 @@ export default {
       
       return new Response(JSON.stringify({
         success: true,
-        email: email
+        email: email,
+        needsReparsing: needsReparsing
       }), {
         headers: { 'Content-Type': 'application/json' }
       });
@@ -272,6 +349,15 @@ export default {
          GROUP BY f.id, f.name`
       ).all();
       
+      // 检查原始数据保存情况
+      const rawContentStats = await env.DB.prepare(
+        `SELECT 
+          COUNT(*) as total,
+          SUM(CASE WHEN raw_content IS NOT NULL AND raw_content != '' THEN 1 ELSE 0 END) as with_raw,
+          SUM(CASE WHEN raw_content IS NULL OR raw_content = '' THEN 1 ELSE 0 END) as without_raw
+         FROM emails`
+      ).first();
+      
       return new Response(JSON.stringify({
         success: true,
         debug: {
@@ -279,6 +365,7 @@ export default {
           emailCount: emailCount?.count || 0,
           folders: folders.results,
           folderStats: folderStats.results,
+          rawContentStats: rawContentStats,
           timestamp: new Date().toISOString()
         }
       }), {
@@ -838,6 +925,7 @@ export default {
     
     const dbStatus = await checkDatabaseStatus(env);
     
+    // 完整的HTML界面代码
     const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1884,6 +1972,12 @@ export default {
                             <ul>
                                 \${result.debug.folderStats.map(f => \`<li>\${f.name}: \${f.count} 封邮件</li>\`).join('')}
                             </ul>
+                            <p><strong>原始数据统计:</strong></p>
+                            <ul>
+                                <li>总邮件: \${result.debug.rawContentStats?.total || 0}</li>
+                                <li>有原始数据: \${result.debug.rawContentStats?.with_raw || 0}</li>
+                                <li>无原始数据: \${result.debug.rawContentStats?.without_raw || 0}</li>
+                            </ul>
                             <p><strong>更新时间:</strong> \${new Date(result.debug.timestamp).toLocaleString()}</p>
                         </div>
                         <button onclick="resetDatabase()" class="danger small">🔄 重置数据库</button>
@@ -1916,7 +2010,7 @@ export default {
             loadFoldersForSelect();
         }
         
-        // 显示邮件详情
+        // 显示邮件详情 - 关键改进：处理原始数据解析
         async function showEmailDetail(emailId) {
             const modal = document.getElementById('email-detail-modal');
             const content = document.getElementById('email-detail-content');
@@ -1930,10 +2024,33 @@ export default {
                     const email = result.email;
                     let contentHtml = '';
                     
-                    // 检查是否解析失败
-                    const isParseFailed = email.body && email.body.includes('邮件内容解析失败');
+                    // 检查是否需要重新解析
+                    let displayText = email.body;
+                    let displayHtml = email.html_body;
+                    let needsReparsing = result.needsReparsing;
                     
-                    if (email.html_body && email.html_body.trim() !== '') {
+                    if (needsReparsing && email.raw_content) {
+                        // 尝试重新解析原始数据
+                        try {
+                            const parseResponse = await fetch('/api/parse-raw', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ rawContent: email.raw_content })
+                            });
+                            
+                            const parseResult = await parseResponse.json();
+                            if (parseResult.success) {
+                                displayText = parseResult.content.text;
+                                displayHtml = parseResult.content.html;
+                                needsReparsing = false; // 解析成功
+                            }
+                        } catch (parseError) {
+                            console.log('重新解析失败:', parseError);
+                        }
+                    }
+                    
+                    // 构建显示内容
+                    if (displayHtml && displayHtml.trim() !== '') {
                         contentHtml = \`
                             <div class="email-detail">
                                 <div class="email-header">
@@ -1942,16 +2059,11 @@ export default {
                                     <p><strong>📋 主题:</strong> \${escapeHtml(email.subject)}</p>
                                     <p><strong>🕒 时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
                                     <p><strong>📁 文件夹:</strong> \${escapeHtml(email.folder_name)}</p>
+                                    \${needsReparsing ? '<p style="color: #ff5722;"><strong>⚠️ 注意:</strong> 此邮件内容是从原始数据重新解析的</p>' : ''}
                                 </div>
                                 <div class="email-html-content">
-                                    \${email.html_body}
+                                    \${displayHtml}
                                 </div>
-                                \${isParseFailed ? \`
-                                    <div style="margin-top: 20px;">
-                                        <h4>📄 原始数据:</h4>
-                                        <div class="raw-content">\${escapeHtml(email.raw_content || '无原始数据')}</div>
-                                    </div>
-                                \` : ''}
                             </div>
                         \`;
                     } else {
@@ -1963,16 +2075,26 @@ export default {
                                     <p><strong>📋 主题:</strong> \${escapeHtml(email.subject)}</p>
                                     <p><strong>🕒 时间:</strong> \${new Date(email.received_at).toLocaleString()}</p>
                                     <p><strong>📁 文件夹:</strong> \${escapeHtml(email.folder_name)}</p>
+                                    \${needsReparsing ? '<p style="color: #ff5722;"><strong>⚠️ 注意:</strong> 此邮件内容是从原始数据重新解析的</p>' : ''}
                                 </div>
                                 <div class="email-content">
-                                    \${escapeHtml(email.body || '📭 无内容')}
+                                    \${escapeHtml(displayText || '📭 无内容')}
                                 </div>
-                                \${isParseFailed ? \`
-                                    <div style="margin-top: 20px;">
-                                        <h4>📄 原始数据:</h4>
-                                        <div class="raw-content">\${escapeHtml(email.raw_content || '无原始数据')}</div>
-                                    </div>
-                                \` : ''}
+                            </div>
+                        \`;
+                    }
+                    
+                    // 添加原始数据查看按钮
+                    if (email.raw_content) {
+                        contentHtml += \`
+                            <div style="margin-top: 20px;">
+                                <button onclick="toggleRawContent()" class="small">📄 \${needsReparsing ? '查看原始数据并重新解析' : '查看原始数据'}</button>
+                                <div id="raw-content-section" class="raw-content" style="display: none; margin-top: 10px;">
+                                    <h4>原始邮件数据:</h4>
+                                    <pre>\${escapeHtml(email.raw_content.substring(0, 5000))}</pre>
+                                    \${email.raw_content.length > 5000 ? '<p>...(原始数据过长，已截断)</p>' : ''}
+                                    <button onclick="reparseEmail(\${email.id})" class="small success" style="margin-top: 10px;">🔄 重新解析此邮件</button>
+                                </div>
                             </div>
                         \`;
                     }
@@ -1985,25 +2107,21 @@ export default {
                     \`;
                     
                     if (currentFolder === 1) {
-                        // 收件箱操作
                         actionButtons += \`
                             <button onclick="markEmailSpam(\${email.id}, true)" class="warning">🚫 标记垃圾邮件</button>
                             <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
                         \`;
                     } else if (currentFolder === 3 || currentFolder === 'blocked') {
-                        // 垃圾邮件/被拦截邮件操作
                         actionButtons += \`
                             <button onclick="markEmailSpam(\${email.id}, false)" class="success">✅ 移回收件箱</button>
                             <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
                         \`;
                     } else if (currentFolder === 2) {
-                        // 已发送操作
                         actionButtons += \`
                             <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
                         \`;
                     }
                     
-                    // 如果不是已发送邮件，添加回复按钮
                     if (currentFolder !== 2) {
                         actionButtons = \`
                             <button onclick="replyToEmail('\${escapeHtml(email.sender)}', '\${escapeHtml(email.subject)}')" class="success">📩 回复</button>
@@ -2021,6 +2139,47 @@ export default {
             }
             
             modal.style.display = 'flex';
+        }
+        
+        // 切换原始数据显示
+        function toggleRawContent() {
+            const rawSection = document.getElementById('raw-content-section');
+            if (rawSection.style.display === 'none') {
+                rawSection.style.display = 'block';
+            } else {
+                rawSection.style.display = 'none';
+            }
+        }
+        
+        // 重新解析邮件
+        async function reparseEmail(emailId) {
+            try {
+                // 获取邮件详情
+                const response = await fetch('/api/email?id=' + emailId);
+                const result = await response.json();
+                
+                if (result.success && result.email.raw_content) {
+                    // 重新解析原始数据
+                    const parseResponse = await fetch('/api/parse-raw', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ rawContent: result.email.raw_content })
+                    });
+                    
+                    const parseResult = await parseResponse.json();
+                    if (parseResult.success) {
+                        alert('✅ 邮件内容已重新解析');
+                        // 重新显示邮件详情
+                        showEmailDetail(emailId);
+                    } else {
+                        alert('❌ 重新解析失败: ' + parseResult.message);
+                    }
+                } else {
+                    alert('❌ 无法获取邮件原始数据');
+                }
+            } catch (error) {
+                alert('❌ 重新解析请求失败: ' + error.message);
+            }
         }
         
         // 回复邮件
@@ -2131,8 +2290,16 @@ export default {
                     emailClass += ' spam';
                 }
                 
+                // 检查是否需要重新解析
+                const needsReparsing = email.body && (
+                    email.body.includes('邮件内容解析失败') || 
+                    email.body.includes('无法解析邮件内容') ||
+                    email.body.includes('提取邮件内容时出错')
+                );
+                
                 const previewText = email.body ? 
-                    (email.body.length > 120 ? email.body.substring(0, 120) + '...' : email.body) : 
+                    (needsReparsing ? '📄 需要重新解析内容' : 
+                     (email.body.length > 120 ? email.body.substring(0, 120) + '...' : email.body)) : 
                     '📭 无内容';
                     
                 emailsHTML += \`
@@ -2146,7 +2313,7 @@ export default {
                                 \${new Date(email.received_at).toLocaleDateString()}
                             </div>
                         </div>
-                        <div style="color: #666; line-height: 1.4; margin-bottom: 15px;">\${escapeHtml(previewText)}</div>
+                        <div style="color: #666; line-height: 1.4; margin-bottom: 15px;">\${escapeHtml(previewText)}\${needsReparsing ? ' <span style="color: #ff5722;">⚠️</span>' : ''}</div>
                         <div class="email-actions">
                             <button onclick="event.stopPropagation(); markEmailRead(\${email.id}, \${email.is_read ? 'false' : 'true'})" class="small">
                                 \${email.is_read ? '📨 标记未读' : '📬 标记已读'}
@@ -2705,77 +2872,122 @@ export default {
   }
 };
 
-// 邮件内容解析函数
-async function parseEmailContent(message) {
-  let text = '';
-  let html = '';
-  let rawContent = '';
-  
+// 从原始邮件数据提取文本内容
+function extractTextFromRawEmail(rawData) {
   try {
-    const raw = await message.raw;
-    if (raw) {
-      rawContent = new TextDecoder().decode(raw);
-      console.log('原始数据已保存，长度:', rawContent.length);
+    if (!rawData || rawData.trim() === '') {
+      return '邮件内容为空';
     }
-  } catch (e) {
-    console.log('获取原始数据失败:', e.message);
-  }
-  
-  try {
-    text = await message.text();
-    if (!text || text.trim() === '') {
-      if (rawContent) {
-        text = extractTextFromRaw(rawContent);
+    
+    console.log('开始解析原始数据，长度:', rawData.length);
+    
+    // 方法1: 尝试提取纯文本部分（如果有MIME格式）
+    const textParts = [];
+    
+    // 查找纯文本部分
+    const textPlainMatch = rawData.match(/Content-Type: text\/plain[^]*?(\r\n\r\n|\n\n)([^]*?)(?=Content-Type:|\-\-|$)/is);
+    if (textPlainMatch && textPlainMatch[2]) {
+      const textContent = textPlainMatch[2].trim();
+      if (textContent && textContent.length > 10) {
+        console.log('找到MIME文本部分，长度:', textContent.length);
+        textParts.push(textContent);
       }
     }
-    console.log('文本内容长度:', text.length);
-  } catch (e) {
-    console.log('获取文本内容失败:', e.message);
-    text = '邮件内容解析失败，请查看原始数据';
-  }
-  
-  try {
-    html = await message.html();
-    console.log('HTML内容长度:', html?.length || 0);
-  } catch (e) {
-    console.log('获取HTML内容失败:', e.message);
-    html = '';
-  }
-  
-  return { text, html, rawContent };
-}
-
-function extractTextFromRaw(rawData) {
-  try {
-    // 简单的文本提取逻辑
-    let text = rawData.replace(/<[^>]*>/g, '')
-                     .replace(/\n\s*\n/g, '\n\n')
-                     .substring(0, 10000)
-                     .trim();
     
-    if (!text || text.trim() === '') {
-      const base64Match = rawData.match(/base64[\s\r\n]+([A-Za-z0-9+/=]+)/);
-      if (base64Match) {
+    // 方法2: 如果找不到MIME部分，尝试简单的文本提取
+    if (textParts.length === 0) {
+      // 移除HTML标签
+      let cleanText = rawData.replace(/<[^>]*>/g, '');
+      // 解码可能的编码内容
+      cleanText = cleanText.replace(/=\?UTF-8\?B\?([^?]*)\?=/gi, (match, p1) => {
         try {
-          text = new TextDecoder().decode(base64ToBytes(base64Match[1]));
+          return atob(p1);
         } catch (e) {
-          console.log('Base64解码失败:', e.message);
+          return p1;
         }
+      });
+      // 移除多余的空白字符
+      cleanText = cleanText.replace(/\s+/g, ' ').trim();
+      
+      if (cleanText && cleanText.length > 10) {
+        console.log('使用清理后的文本，长度:', cleanText.length);
+        textParts.push(cleanText.substring(0, 5000));
       }
     }
     
-    return text || '无法解析邮件内容，请查看原始数据';
+    // 方法3: 如果还是找不到，返回原始数据的前面部分
+    if (textParts.length === 0) {
+      const fallbackText = rawData.substring(0, 3000);
+      console.log('使用回退文本，长度:', fallbackText.length);
+      textParts.push(fallbackText);
+    }
+    
+    const result = textParts.join('\n\n').substring(0, 10000);
+    console.log('最终提取文本长度:', result.length);
+    return result;
+    
   } catch (error) {
-    return '内容提取失败: ' + error.message;
+    console.error('提取文本错误:', error);
+    return '提取邮件内容时出错: ' + error.message;
   }
 }
 
-function base64ToBytes(base64) {
-  const binString = atob(base64);
-  return Uint8Array.from(binString, (m) => m.codePointAt(0));
+// 从原始数据提取可读内容（用于网页端解析）
+function extractReadableContent(rawData) {
+  try {
+    if (!rawData || rawData.trim() === '') {
+      return { text: '原始数据为空', html: '' };
+    }
+    
+    let text = '';
+    let html = '';
+    
+    // 尝试提取纯文本部分
+    const textPlainMatch = rawData.match(/Content-Type: text\/plain[^]*?(\r\n\r\n|\n\n)([^]*?)(?=Content-Type:|\-\-|$)/is);
+    if (textPlainMatch && textPlainMatch[2]) {
+      text = textPlainMatch[2].trim();
+    }
+    
+    // 尝试提取HTML部分
+    const textHtmlMatch = rawData.match(/Content-Type: text\/html[^]*?(\r\n\r\n|\n\n)([^]*?)(?=Content-Type:|\-\-|$)/is);
+    if (textHtmlMatch && textHtmlMatch[2]) {
+      html = textHtmlMatch[2].trim();
+    }
+    
+    // 如果都没有找到，使用简单清理
+    if (!text && !html) {
+      // 移除HTML标签获取纯文本
+      text = rawData.replace(/<[^>]*>/g, '')
+                   .replace(/\s+/g, ' ')
+                   .trim()
+                   .substring(0, 5000);
+    }
+    
+    // 解码可能的base64编码
+    if (text) {
+      text = text.replace(/=\?UTF-8\?B\?([^?]*)\?=/gi, (match, p1) => {
+        try {
+          return atob(p1);
+        } catch (e) {
+          return p1;
+        }
+      });
+    }
+    
+    return {
+      text: text || '无法从原始数据提取文本内容',
+      html: html || ''
+    };
+  } catch (error) {
+    console.error('解析原始数据错误:', error);
+    return {
+      text: '解析原始数据时出错: ' + error.message,
+      html: ''
+    };
+  }
 }
 
-// 数据库初始化 - 增强版本
+// 数据库初始化
 async function initializeDatabase(env) {
   try {
     const tables = await env.DB.prepare(
@@ -2789,7 +3001,7 @@ async function initializeDatabase(env) {
 
     console.log("初始化数据库...");
     
-    // 创建文件夹表 - 增加parent_id支持树形结构
+    // 创建文件夹表
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS folders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2800,7 +3012,7 @@ async function initializeDatabase(env) {
       )
     `).run();
     
-    // 创建邮件表 - 增加raw_content和blocked_rule_id
+    // 创建邮件表 - 确保有raw_content字段
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS emails (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2860,18 +3072,6 @@ async function initializeDatabase(env) {
       ).bind(folder.id, folder.name, folder.parent_id, folder.is_system).run();
     }
     
-    // 插入默认拦截规则示例
-    const defaultRules = [
-      { name: '拦截测试邮件', type: 'subject', value: 'test', action: 'spam', target_folder_id: 3 },
-      { name: '拦截特定发件人', type: 'sender', value: 'spam@example.com', action: 'delete', target_folder_id: 4 }
-    ];
-    
-    for (const rule of defaultRules) {
-      await env.DB.prepare(
-        "INSERT OR IGNORE INTO rules (name, type, value, action, target_folder_id, is_active) VALUES (?, ?, ?, ?, ?, 1)"
-      ).bind(rule.name, rule.type, rule.value, rule.action, rule.target_folder_id).run();
-    }
-    
     console.log("数据库初始化完成");
   } catch (error) {
     console.error("数据库初始化错误:", error);
@@ -2879,14 +3079,24 @@ async function initializeDatabase(env) {
   }
 }
 
-// 保存邮件到数据库 - 增强版本
+// 保存邮件到数据库 - 强制保存原始数据
 async function saveEmailToDatabase(env, from, to, subject, text, html, folderId, isSpam, rawContent, blockedRuleId = null) {
   try {
-    console.log('保存邮件到数据库...', { from, to, subject: subject.substring(0, 50), folderId, isSpam });
+    console.log('保存邮件到数据库...', { 
+      from, to, 
+      subject: subject.substring(0, 50), 
+      folderId, isSpam,
+      rawContentLength: rawContent?.length || 0
+    });
+    
+    // 确保原始数据不为空
+    if (!rawContent || rawContent.trim() === '') {
+      rawContent = '原始数据为空 - 发件人: ' + from + ' 主题: ' + subject;
+    }
     
     const result = await env.DB.prepare(
       "INSERT INTO emails (sender, recipient, subject, body, html_body, raw_content, folder_id, is_spam, blocked_rule_id, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).bind(from, to, subject, text, html || '', rawContent || '', folderId, isSpam, blockedRuleId, new Date().toISOString()).run();
+    ).bind(from, to, subject, text || '无内容', html || '', rawContent, folderId, isSpam, blockedRuleId, new Date().toISOString()).run();
     
     console.log('✅ 邮件保存成功，ID:', result.meta.last_row_id);
     return result;
