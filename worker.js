@@ -1,4 +1,4 @@
-﻿// 完整的邮件管理系统 - 修复内容解析 + 完整文件夹功能
+﻿// 完整的邮件管理系统 - 修复内容解析 + 完整拦截规则 + 文件夹管理
 export default {
   async email(message, env, ctx) {
     try {
@@ -13,63 +13,26 @@ export default {
       
       console.log('邮件信息:', { from, to, subject });
       
-      // 改进的邮件内容获取方式
-      let text = '';
-      let html = '';
-      let rawData = '';
-      
-      try {
-        // 首先尝试获取原始数据
-        const raw = await message.raw;
-        if (raw) {
-          rawData = new TextDecoder().decode(raw);
-          console.log('原始数据长度:', rawData.length);
-        }
-      } catch (e) {
-        console.log('获取原始数据失败:', e.message);
-      }
-      
-      try {
-        // 尝试获取文本内容
-        text = await message.text();
-        if (!text || text.trim() === '') {
-          // 如果text为空，从原始数据提取文本
-          if (rawData) {
-            // 简单的文本提取：移除HTML标签，保留纯文本
-            text = rawData.replace(/<[^>]*>/g, '')
-                         .replace(/\n\s*\n/g, '\n\n')
-                         .substring(0, 10000)
-                         .trim();
-          }
-        }
-        console.log('文本内容长度:', text.length);
-      } catch (e) {
-        console.log('获取文本内容失败:', e.message);
-        text = '邮件内容解析失败，请查看原始数据';
-      }
-      
-      try {
-        // 尝试获取HTML内容
-        html = await message.html();
-        console.log('HTML内容长度:', html?.length || 0);
-      } catch (e) {
-        console.log('获取HTML内容失败:', e.message);
-        html = '';
-      }
-      
-      // 如果内容都为空，保存原始数据
-      if ((!text || text.trim() === '') && (!html || html.trim() === '')) {
-        text = rawData ? rawData.substring(0, 5000) : '无法读取邮件内容 - 原始数据获取失败';
-      }
-      
-      // 保存原始数据用于调试
-      const rawContent = rawData.substring(0, 10000);
+      // 解析邮件内容
+      const { text, html, rawContent } = await parseEmailContent(message);
       
       // 检查拦截规则
-      const shouldBlock = await checkBlockRules(from, subject, text, env);
-      if (shouldBlock) {
-        console.log(`🚫 邮件被拦截: ${from} -> ${to}`);
-        await saveEmailToDatabase(env, from, to, subject, text, html, 3, 1, rawContent);
+      const blockResult = await checkBlockRules(from, subject, text + ' ' + html, env);
+      
+      if (blockResult.blocked) {
+        console.log(`🚫 邮件被拦截: ${from} -> ${to}, 规则: ${blockResult.ruleName}`);
+        
+        let targetFolderId = blockResult.targetFolderId || 3; // 默认垃圾邮件文件夹
+        let isSpam = 1;
+        
+        if (blockResult.action === 'delete') {
+          targetFolderId = 4; // 已删除文件夹
+        } else if (blockResult.action === 'inbox') {
+          targetFolderId = 1; // 收件箱
+          isSpam = 0;
+        }
+        
+        await saveEmailToDatabase(env, from, to, subject, text, html, targetFolderId, isSpam, rawContent, blockResult.ruleId);
         return;
       }
       
@@ -81,8 +44,10 @@ export default {
     } catch (error) {
       console.error('❌ 处理邮件时出错:', error);
       try {
-        await saveEmailToDatabase(env, message.from, message.to, "处理错误的邮件", 
-          "邮件处理过程中发生错误: " + error.message, "", 3, 1, '');
+        await saveEmailToDatabase(env, message.from, message.to, 
+          "处理错误的邮件", 
+          "邮件处理过程中发生错误: " + error.message, 
+          "", 3, 1, '');
       } catch (e) {
         console.error('连错误邮件都无法存储:', e);
       }
@@ -112,10 +77,12 @@ export default {
       'POST:/api/emails/mark-spam': () => this.markEmailSpam(request, env),
       'POST:/api/send': () => this.sendEmail(request, env),
       'GET:/api/folders': () => this.getFolders(request, env),
+      'GET:/api/folders/tree': () => this.getFolderTree(request, env),
       'POST:/api/folders': () => this.createFolder(request, env),
       'POST:/api/folders/delete': () => this.deleteFolder(request, env),
       'GET:/api/rules': () => this.getRules(request, env),
       'POST:/api/rules': () => this.createRule(request, env),
+      'PUT:/api/rules/toggle': () => this.toggleRule(request, env),
       'POST:/api/rules/delete': () => this.deleteRule(request, env),
       'POST:/api/db/reset': () => this.resetDatabase(request, env),
       'GET:/api/stats': () => this.getStats(request, env),
@@ -137,7 +104,50 @@ export default {
     return this.getAdminInterface(request, env);
   },
 
-  // 获取被拦截的邮件
+  // 获取文件夹树形结构
+  async getFolderTree(request, env) {
+    try {
+      const result = await getFolderTree(env);
+      return new Response(JSON.stringify(result), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ 
+        success: false, 
+        message: "获取文件夹树失败: " + error.message 
+      }), { 
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  },
+
+  // 切换规则状态
+  async toggleRule(request, env) {
+    try {
+      const { id, isActive } = await request.json();
+      
+      await env.DB.prepare("UPDATE rules SET is_active = ? WHERE id = ?")
+        .bind(isActive ? 1 : 0, id).run();
+      
+      return new Response(JSON.stringify({
+        success: true,
+        message: isActive ? "规则已启用" : "规则已禁用"
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ 
+        success: false, 
+        message: "操作失败: " + error.message 
+      }), { 
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  },
+
+  // 获取被拦截邮件
   async getBlockedEmails(request, env) {
     try {
       const url = new URL(request.url);
@@ -145,16 +155,12 @@ export default {
       const limit = 20;
       const offset = (page - 1) * limit;
       
-      // 获取被拦截邮件总数
       const countResult = await env.DB.prepare(
         "SELECT COUNT(*) as total FROM emails WHERE folder_id = 3 AND is_spam = 1 AND is_deleted = 0"
       ).first();
       
-      // 获取被拦截邮件列表
       const result = await env.DB.prepare(
-        `SELECT e.id, e.sender, e.recipient, e.subject, e.body, e.html_body, 
-                e.is_read, e.has_attachments, e.received_at, e.raw_content,
-                f.name as folder_name
+        `SELECT e.*, f.name as folder_name
          FROM emails e 
          LEFT JOIN folders f ON e.folder_id = f.id 
          WHERE e.folder_id = 3 AND e.is_spam = 1 AND e.is_deleted = 0 
@@ -172,9 +178,7 @@ export default {
           totalPages: Math.ceil((countResult?.total || 0) / limit)
         }
       }), {
-        headers: { 
-          'Content-Type': 'application/json'
-        }
+        headers: { 'Content-Type': 'application/json' }
       });
     } catch (error) {
       console.error("获取被拦截邮件错误:", error);
@@ -575,7 +579,7 @@ export default {
   async getFolders(request, env) {
     try {
       const result = await env.DB.prepare(
-        "SELECT id, name, created_at FROM folders ORDER BY id"
+        "SELECT id, name, parent_id, is_system, created_at FROM folders ORDER BY is_system DESC, name"
       ).all();
       
       return new Response(JSON.stringify({
@@ -598,16 +602,16 @@ export default {
   // 创建文件夹
   async createFolder(request, env) {
     try {
-      const { name } = await request.json();
+      const { name, parentId } = await request.json();
       
       const result = await env.DB.prepare(
-        "INSERT INTO folders (name) VALUES (?)"
-      ).bind(name).run();
+        "INSERT INTO folders (name, parent_id, is_system) VALUES (?, ?, 0)"
+      ).bind(name, parentId || null).run();
       
       return new Response(JSON.stringify({
         success: true,
         message: "文件夹创建成功",
-        folder: { id: result.meta.last_row_id, name }
+        folder: { id: result.meta.last_row_id, name, parent_id: parentId }
       }), {
         headers: { 'Content-Type': 'application/json' }
       });
@@ -627,7 +631,12 @@ export default {
     try {
       const { id } = await request.json();
       
-      if (id <= 4) {
+      // 检查是否是系统文件夹
+      const folder = await env.DB.prepare(
+        "SELECT is_system FROM folders WHERE id = ?"
+      ).bind(id).first();
+      
+      if (folder && folder.is_system) {
         return new Response(JSON.stringify({ 
           success: false, 
           message: "系统默认文件夹不能删除" 
@@ -637,7 +646,24 @@ export default {
         });
       }
       
+      // 检查文件夹是否有子文件夹
+      const subFolders = await env.DB.prepare(
+        "SELECT COUNT(*) as count FROM folders WHERE parent_id = ?"
+      ).bind(id).first();
+      
+      if (subFolders && subFolders.count > 0) {
+        return new Response(JSON.stringify({ 
+          success: false, 
+          message: "该文件夹包含子文件夹，请先删除子文件夹" 
+        }), { 
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // 将文件夹中的邮件移动到收件箱
       await env.DB.prepare("UPDATE emails SET folder_id = 1 WHERE folder_id = ?").bind(id).run();
+      // 删除文件夹
       await env.DB.prepare("DELETE FROM folders WHERE id = ?").bind(id).run();
       
       return new Response(JSON.stringify({
@@ -812,8 +838,7 @@ export default {
     
     const dbStatus = await checkDatabaseStatus(env);
     
-    const html = `
-<!DOCTYPE html>
+    const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
@@ -1262,6 +1287,39 @@ export default {
             filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
         }
         
+        /* 规则和文件夹管理样式 */
+        .rules-list, .folders-list {
+            background: rgba(255, 255, 255, 0.25);
+            border-radius: 16px;
+            padding: 20px;
+            margin: 20px 0;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+        }
+        .rule-item, .folder-item {
+            background: rgba(255, 255, 255, 0.4);
+            margin: 12px 0;
+            padding: 16px;
+            border-radius: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-left: 4px solid #4fc3f7;
+        }
+        .rule-item.inactive, .folder-item.system {
+            border-left-color: #9e9e9e;
+            background: rgba(255, 255, 255, 0.25);
+        }
+        .rule-details, .folder-details {
+            flex: 1;
+            text-align: left;
+        }
+        .rule-actions, .folder-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
         /* 其他样式 */
         .hidden {
             display: none !important;
@@ -1459,6 +1517,15 @@ export default {
                 margin: 20px 0;
                 border-radius: 14px;
             }
+            .rule-item, .folder-item {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .rule-actions, .folder-actions {
+                margin-top: 12px;
+                width: 100%;
+                justify-content: space-between;
+            }
         }
         
         @media (max-width: 480px) {
@@ -1533,6 +1600,90 @@ export default {
             </div>
             <div id="email-detail-content">
                 <p>加载中...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 规则管理弹窗 -->
+    <div id="rules-modal" class="modal">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h2>🛡️ 拦截规则管理</h2>
+                <button class="close-modal" onclick="closeModal('rules-modal')">&times;</button>
+            </div>
+            <div id="rules-content">
+                <div class="section">
+                    <h3>添加新规则</h3>
+                    <div class="form-group">
+                        <label for="rule-name">规则名称:</label>
+                        <input type="text" id="rule-name" placeholder="规则名称">
+                    </div>
+                    <div class="form-group">
+                        <label for="rule-type">规则类型:</label>
+                        <select id="rule-type">
+                            <option value="sender">发件人包含</option>
+                            <option value="subject">主题包含</option>
+                            <option value="content">内容包含</option>
+                            <option value="sender_exact">发件人完全匹配</option>
+                            <option value="domain">域名匹配</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="rule-value">规则值:</label>
+                        <input type="text" id="rule-value" placeholder="要匹配的内容">
+                    </div>
+                    <div class="form-group">
+                        <label for="rule-action">执行动作:</label>
+                        <select id="rule-action">
+                            <option value="spam">标记为垃圾邮件</option>
+                            <option value="delete">直接删除</option>
+                            <option value="inbox">移动到收件箱</option>
+                        </select>
+                    </div>
+                    <button onclick="createRule()">添加规则</button>
+                </div>
+                
+                <div class="section">
+                    <h3>现有规则</h3>
+                    <button onclick="loadRules()">🔄 刷新规则列表</button>
+                    <div id="rules-list" class="rules-list">
+                        <div class="message">📋 加载中...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 文件夹管理弹窗 -->
+    <div id="folders-modal" class="modal">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h2>📁 文件夹管理</h2>
+                <button class="close-modal" onclick="closeModal('folders-modal')">&times;</button>
+            </div>
+            <div id="folders-content">
+                <div class="section">
+                    <h3>创建新文件夹</h3>
+                    <div class="form-group">
+                        <label for="folder-name">文件夹名称:</label>
+                        <input type="text" id="folder-name" placeholder="文件夹名称">
+                    </div>
+                    <div class="form-group">
+                        <label for="folder-parent">父文件夹 (可选):</label>
+                        <select id="folder-parent">
+                            <option value="">无 (根文件夹)</option>
+                        </select>
+                    </div>
+                    <button onclick="createFolder()">创建文件夹</button>
+                </div>
+                
+                <div class="section">
+                    <h3>现有文件夹</h3>
+                    <button onclick="loadFolders()">🔄 刷新文件夹列表</button>
+                    <div id="folders-list" class="folders-list">
+                        <div class="message">📁 加载中...</div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -1666,9 +1817,24 @@ export default {
         <div id="tab-settings" class="tab-content hidden">
             <div class="section">
                 <h2>⚙️ 系统设置</h2>
-                <button onclick="resetDatabase()" class="danger">🔄 重置数据库</button>
-                <p><small>⚠️ 警告: 这将删除所有邮件、文件夹和规则</small></p>
-                <button onclick="logout()">🚪 退出登录</button>
+                <div class="section">
+                    <h3>🛡️ 拦截规则</h3>
+                    <p>管理邮件拦截规则，自动处理符合规则的邮件</p>
+                    <button onclick="showRulesModal()">管理拦截规则</button>
+                </div>
+                
+                <div class="section">
+                    <h3>📁 文件夹管理</h3>
+                    <p>创建和管理自定义文件夹，组织您的邮件</p>
+                    <button onclick="showFoldersModal()">管理文件夹</button>
+                </div>
+                
+                <div class="section">
+                    <h3>⚙️ 系统管理</h3>
+                    <button onclick="resetDatabase()" class="danger">🔄 重置数据库</button>
+                    <p><small>⚠️ 警告: 这将删除所有邮件、文件夹和规则</small></p>
+                    <button onclick="logout()">🚪 退出登录</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1695,6 +1861,7 @@ export default {
         async function initializeApp() {
             await loadStats();
             await loadEmails(1);
+            await loadFoldersForSelect();
         }
         
         // 显示系统状态
@@ -1734,6 +1901,19 @@ export default {
         // 关闭弹窗
         function closeModal(modalId) {
             document.getElementById(modalId).style.display = 'none';
+        }
+        
+        // 显示规则管理弹窗
+        function showRulesModal() {
+            document.getElementById('rules-modal').style.display = 'flex';
+            loadRules();
+        }
+        
+        // 显示文件夹管理弹窗
+        function showFoldersModal() {
+            document.getElementById('folders-modal').style.display = 'flex';
+            loadFolders();
+            loadFoldersForSelect();
         }
         
         // 显示邮件详情
@@ -1810,21 +1990,15 @@ export default {
                             <button onclick="markEmailSpam(\${email.id}, true)" class="warning">🚫 标记垃圾邮件</button>
                             <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
                         \`;
-                    } else if (currentFolder === 3) {
-                        // 垃圾邮件操作
+                    } else if (currentFolder === 3 || currentFolder === 'blocked') {
+                        // 垃圾邮件/被拦截邮件操作
                         actionButtons += \`
-                            <button onclick="markEmailSpam(\${email.id}, false)" class="success">✅ 不是垃圾邮件</button>
+                            <button onclick="markEmailSpam(\${email.id}, false)" class="success">✅ 移回收件箱</button>
                             <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
                         \`;
                     } else if (currentFolder === 2) {
                         // 已发送操作
                         actionButtons += \`
-                            <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
-                        \`;
-                    } else if (currentFolder === 'blocked') {
-                        // 被拦截邮件操作
-                        actionButtons += \`
-                            <button onclick="markEmailSpam(\${email.id}, false)" class="success">✅ 移回收件箱</button>
                             <button onclick="deleteEmail(\${email.id})" class="danger">🗑️ 删除</button>
                         \`;
                     }
@@ -1953,10 +2127,8 @@ export default {
                 let emailClass = 'email-item';
                 if (folderId === 1 && !email.is_read) {
                     emailClass += ' unread';
-                } else if (folderId === 3) {
+                } else if (folderId === 3 || folderId === 'blocked') {
                     emailClass += ' spam';
-                } else if (folderId === 'blocked') {
-                    emailClass += ' blocked';
                 }
                 
                 const previewText = email.body ? 
@@ -2001,10 +2173,6 @@ export default {
                         <button onclick="event.stopPropagation(); deleteEmail(\${emailId})" class="small danger">🗑️ 删除</button>
                     \`;
                 case 3: // 垃圾邮件
-                    return \`
-                        <button onclick="event.stopPropagation(); markEmailSpam(\${emailId}, false)" class="small success">✅ 不是垃圾邮件</button>
-                        <button onclick="event.stopPropagation(); deleteEmail(\${emailId})" class="small danger">🗑️ 删除</button>
-                    \`;
                 case 'blocked': // 被拦截邮件
                     return \`
                         <button onclick="event.stopPropagation(); markEmailSpam(\${emailId}, false)" class="small success">✅ 移回收件箱</button>
@@ -2108,6 +2276,288 @@ export default {
             if (tabName === 'sent') loadEmails(2);
             if (tabName === 'spam') loadEmails(3);
             if (tabName === 'blocked') loadBlockedEmails();
+        }
+        
+        // 加载规则
+        async function loadRules() {
+            try {
+                const response = await fetch('/api/rules');
+                const result = await response.json();
+                
+                if (result.success) {
+                    const rulesList = document.getElementById('rules-list');
+                    
+                    if (result.rules.length === 0) {
+                        rulesList.innerHTML = '<div class="message">📋 暂无规则</div>';
+                        return;
+                    }
+                    
+                    let rulesHTML = '';
+                    result.rules.forEach(rule => {
+                        const ruleClass = rule.is_active ? 'rule-item' : 'rule-item inactive';
+                        const statusText = rule.is_active ? '启用' : '禁用';
+                        const statusBtnClass = rule.is_active ? 'warning' : 'success';
+                        const statusBtnText = rule.is_active ? '禁用' : '启用';
+                        
+                        rulesHTML += \`
+                            <div class="\${ruleClass}">
+                                <div class="rule-details">
+                                    <h4>\${escapeHtml(rule.name)}</h4>
+                                    <p><strong>类型:</strong> \${getRuleTypeText(rule.type)} | <strong>值:</strong> \${escapeHtml(rule.value)}</p>
+                                    <p><strong>动作:</strong> \${getRuleActionText(rule.action)} | <strong>状态:</strong> \${statusText}</p>
+                                    <small>创建时间: \${new Date(rule.created_at).toLocaleString()}</small>
+                                </div>
+                                <div class="rule-actions">
+                                    <button onclick="toggleRule(\${rule.id}, \${rule.is_active ? 'false' : 'true'})" class="small \${statusBtnClass}">\${statusBtnText}</button>
+                                    <button onclick="deleteRule(\${rule.id})" class="small danger">删除</button>
+                                </div>
+                            </div>
+                        \`;
+                    });
+                    
+                    rulesList.innerHTML = rulesHTML;
+                } else {
+                    document.getElementById('rules-list').innerHTML = '<div class="message error">❌ 加载规则失败: ' + result.message + '</div>';
+                }
+            } catch (error) {
+                document.getElementById('rules-list').innerHTML = '<div class="message error">❌ 请求失败: ' + error.message + '</div>';
+            }
+        }
+        
+        // 获取规则类型文本
+        function getRuleTypeText(type) {
+            const types = {
+                'sender': '发件人包含',
+                'subject': '主题包含',
+                'content': '内容包含',
+                'sender_exact': '发件人完全匹配',
+                'domain': '域名匹配'
+            };
+            return types[type] || type;
+        }
+        
+        // 获取规则动作文本
+        function getRuleActionText(action) {
+            const actions = {
+                'spam': '标记为垃圾邮件',
+                'delete': '直接删除',
+                'inbox': '移动到收件箱'
+            };
+            return actions[action] || action;
+        }
+        
+        // 创建规则
+        async function createRule() {
+            const name = document.getElementById('rule-name').value;
+            const type = document.getElementById('rule-type').value;
+            const value = document.getElementById('rule-value').value;
+            const action = document.getElementById('rule-action').value;
+            
+            if (!name || !type || !value) {
+                alert('❌ 请填写完整的规则信息');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/rules', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        name, 
+                        type, 
+                        value, 
+                        action,
+                        target_folder_id: action === 'spam' ? 3 : (action === 'delete' ? 4 : 1)
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ 规则创建成功');
+                    document.getElementById('rule-name').value = '';
+                    document.getElementById('rule-value').value = '';
+                    loadRules();
+                } else {
+                    alert('❌ 创建规则失败: ' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 请求失败: ' + error.message);
+            }
+        }
+        
+        // 切换规则状态
+        async function toggleRule(ruleId, isActive) {
+            try {
+                const response = await fetch('/api/rules/toggle', {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ id: ruleId, isActive: isActive })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    loadRules();
+                } else {
+                    alert('❌ 操作失败: ' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 请求失败: ' + error.message);
+            }
+        }
+        
+        // 删除规则
+        async function deleteRule(ruleId) {
+            if (!confirm('⚠️ 确定要删除这条规则吗？')) return;
+            
+            try {
+                const response = await fetch('/api/rules/delete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ id: ruleId })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ 规则已删除');
+                    loadRules();
+                } else {
+                    alert('❌ 删除规则失败: ' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 请求失败: ' + error.message);
+            }
+        }
+        
+        // 加载文件夹
+        async function loadFolders() {
+            try {
+                const response = await fetch('/api/folders');
+                const result = await response.json();
+                
+                if (result.success) {
+                    const foldersList = document.getElementById('folders-list');
+                    
+                    if (result.folders.length === 0) {
+                        foldersList.innerHTML = '<div class="message">📁 暂无文件夹</div>';
+                        return;
+                    }
+                    
+                    let foldersHTML = '';
+                    result.folders.forEach(folder => {
+                        const folderClass = folder.is_system ? 'folder-item system' : 'folder-item';
+                        const systemText = folder.is_system ? '系统文件夹' : '自定义文件夹';
+                        
+                        foldersHTML += \`
+                            <div class="\${folderClass}">
+                                <div class="folder-details">
+                                    <h4>\${escapeHtml(folder.name)}</h4>
+                                    <p><strong>类型:</strong> \${systemText}</p>
+                                    <small>创建时间: \${new Date(folder.created_at).toLocaleString()}</small>
+                                </div>
+                                \${!folder.is_system ? \`
+                                    <div class="folder-actions">
+                                        <button onclick="deleteFolder(\${folder.id})" class="small danger">删除</button>
+                                    </div>
+                                \` : ''}
+                            </div>
+                        \`;
+                    });
+                    
+                    foldersList.innerHTML = foldersHTML;
+                } else {
+                    document.getElementById('folders-list').innerHTML = '<div class="message error">❌ 加载文件夹失败: ' + result.message + '</div>';
+                }
+            } catch (error) {
+                document.getElementById('folders-list').innerHTML = '<div class="message error">❌ 请求失败: ' + error.message + '</div>';
+            }
+        }
+        
+        // 为选择框加载文件夹
+        async function loadFoldersForSelect() {
+            try {
+                const response = await fetch('/api/folders');
+                const result = await response.json();
+                
+                if (result.success) {
+                    const select = document.getElementById('folder-parent');
+                    // 清空现有选项（保留第一个"无"选项）
+                    while (select.children.length > 1) {
+                        select.removeChild(select.lastChild);
+                    }
+                    
+                    // 添加文件夹选项
+                    result.folders.forEach(folder => {
+                        if (!folder.is_system) {
+                            const option = document.createElement('option');
+                            option.value = folder.id;
+                            option.textContent = folder.name;
+                            select.appendChild(option);
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('加载文件夹选择框失败:', error);
+            }
+        }
+        
+        // 创建文件夹
+        async function createFolder() {
+            const name = document.getElementById('folder-name').value;
+            const parentId = document.getElementById('folder-parent').value || null;
+            
+            if (!name) {
+                alert('❌ 请输入文件夹名称');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/folders', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ name, parentId })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ 文件夹创建成功');
+                    document.getElementById('folder-name').value = '';
+                    loadFolders();
+                    loadFoldersForSelect();
+                } else {
+                    alert('❌ 创建文件夹失败: ' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 请求失败: ' + error.message);
+            }
+        }
+        
+        // 删除文件夹
+        async function deleteFolder(folderId) {
+            if (!confirm('⚠️ 确定要删除这个文件夹吗？文件夹内的邮件将移动到收件箱')) return;
+            
+            try {
+                const response = await fetch('/api/folders/delete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ id: folderId })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ 文件夹已删除');
+                    loadFolders();
+                    loadFoldersForSelect();
+                } else {
+                    alert('❌ 删除文件夹失败: ' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 请求失败: ' + error.message);
+            }
         }
         
         // 登录
@@ -2255,7 +2705,77 @@ export default {
   }
 };
 
-// 数据库初始化函数
+// 邮件内容解析函数
+async function parseEmailContent(message) {
+  let text = '';
+  let html = '';
+  let rawContent = '';
+  
+  try {
+    const raw = await message.raw;
+    if (raw) {
+      rawContent = new TextDecoder().decode(raw);
+      console.log('原始数据已保存，长度:', rawContent.length);
+    }
+  } catch (e) {
+    console.log('获取原始数据失败:', e.message);
+  }
+  
+  try {
+    text = await message.text();
+    if (!text || text.trim() === '') {
+      if (rawContent) {
+        text = extractTextFromRaw(rawContent);
+      }
+    }
+    console.log('文本内容长度:', text.length);
+  } catch (e) {
+    console.log('获取文本内容失败:', e.message);
+    text = '邮件内容解析失败，请查看原始数据';
+  }
+  
+  try {
+    html = await message.html();
+    console.log('HTML内容长度:', html?.length || 0);
+  } catch (e) {
+    console.log('获取HTML内容失败:', e.message);
+    html = '';
+  }
+  
+  return { text, html, rawContent };
+}
+
+function extractTextFromRaw(rawData) {
+  try {
+    // 简单的文本提取逻辑
+    let text = rawData.replace(/<[^>]*>/g, '')
+                     .replace(/\n\s*\n/g, '\n\n')
+                     .substring(0, 10000)
+                     .trim();
+    
+    if (!text || text.trim() === '') {
+      const base64Match = rawData.match(/base64[\s\r\n]+([A-Za-z0-9+/=]+)/);
+      if (base64Match) {
+        try {
+          text = new TextDecoder().decode(base64ToBytes(base64Match[1]));
+        } catch (e) {
+          console.log('Base64解码失败:', e.message);
+        }
+      }
+    }
+    
+    return text || '无法解析邮件内容，请查看原始数据';
+  } catch (error) {
+    return '内容提取失败: ' + error.message;
+  }
+}
+
+function base64ToBytes(base64) {
+  const binString = atob(base64);
+  return Uint8Array.from(binString, (m) => m.codePointAt(0));
+}
+
+// 数据库初始化 - 增强版本
 async function initializeDatabase(env) {
   try {
     const tables = await env.DB.prepare(
@@ -2269,16 +2789,18 @@ async function initializeDatabase(env) {
 
     console.log("初始化数据库...");
     
-    // 创建文件夹表
+    // 创建文件夹表 - 增加parent_id支持树形结构
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS folders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
+        parent_id INTEGER,
+        is_system BOOLEAN DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `).run();
     
-    // 创建邮件表 - 增加raw_content字段
+    // 创建邮件表 - 增加raw_content和blocked_rule_id
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS emails (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2293,6 +2815,7 @@ async function initializeDatabase(env) {
         is_deleted BOOLEAN DEFAULT 0,
         has_attachments BOOLEAN DEFAULT 0,
         folder_id INTEGER DEFAULT 1,
+        blocked_rule_id INTEGER,
         received_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `).run();
@@ -2325,16 +2848,28 @@ async function initializeDatabase(env) {
     
     // 插入默认文件夹
     const defaultFolders = [
-      { id: 1, name: '收件箱' },
-      { id: 2, name: '已发送' },
-      { id: 3, name: '垃圾邮件' },
-      { id: 4, name: '已删除' }
+      { id: 1, name: '收件箱', parent_id: null, is_system: 1 },
+      { id: 2, name: '已发送', parent_id: null, is_system: 1 },
+      { id: 3, name: '垃圾邮件', parent_id: null, is_system: 1 },
+      { id: 4, name: '已删除', parent_id: null, is_system: 1 }
     ];
     
     for (const folder of defaultFolders) {
       await env.DB.prepare(
-        "INSERT OR IGNORE INTO folders (id, name) VALUES (?, ?)"
-      ).bind(folder.id, folder.name).run();
+        "INSERT OR IGNORE INTO folders (id, name, parent_id, is_system) VALUES (?, ?, ?, ?)"
+      ).bind(folder.id, folder.name, folder.parent_id, folder.is_system).run();
+    }
+    
+    // 插入默认拦截规则示例
+    const defaultRules = [
+      { name: '拦截测试邮件', type: 'subject', value: 'test', action: 'spam', target_folder_id: 3 },
+      { name: '拦截特定发件人', type: 'sender', value: 'spam@example.com', action: 'delete', target_folder_id: 4 }
+    ];
+    
+    for (const rule of defaultRules) {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO rules (name, type, value, action, target_folder_id, is_active) VALUES (?, ?, ?, ?, ?, 1)"
+      ).bind(rule.name, rule.type, rule.value, rule.action, rule.target_folder_id).run();
     }
     
     console.log("数据库初始化完成");
@@ -2344,20 +2879,102 @@ async function initializeDatabase(env) {
   }
 }
 
-// 保存邮件到数据库的辅助函数
-async function saveEmailToDatabase(env, from, to, subject, text, html, folderId, isSpam, rawContent) {
+// 保存邮件到数据库 - 增强版本
+async function saveEmailToDatabase(env, from, to, subject, text, html, folderId, isSpam, rawContent, blockedRuleId = null) {
   try {
     console.log('保存邮件到数据库...', { from, to, subject: subject.substring(0, 50), folderId, isSpam });
     
     const result = await env.DB.prepare(
-      "INSERT INTO emails (sender, recipient, subject, body, html_body, raw_content, folder_id, is_spam, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).bind(from, to, subject, text, html || '', rawContent || '', folderId, isSpam, new Date().toISOString()).run();
+      "INSERT INTO emails (sender, recipient, subject, body, html_body, raw_content, folder_id, is_spam, blocked_rule_id, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(from, to, subject, text, html || '', rawContent || '', folderId, isSpam, blockedRuleId, new Date().toISOString()).run();
     
     console.log('✅ 邮件保存成功，ID:', result.meta.last_row_id);
     return result;
   } catch (error) {
     console.error('❌ 保存邮件失败:', error);
     throw error;
+  }
+}
+
+// 检查拦截规则
+async function checkBlockRules(from, subject, body, env) {
+  try {
+    const rules = await env.DB.prepare(
+      "SELECT id, name, type, value, action, target_folder_id, is_active FROM rules WHERE is_active = 1"
+    ).all();
+    
+    for (const rule of rules.results) {
+      if (await matchesRule(from, subject, body, rule)) {
+        console.log(`📧 邮件匹配拦截规则: ${rule.name} (${rule.type} = ${rule.value})`);
+        return {
+          blocked: true,
+          ruleId: rule.id,
+          ruleName: rule.name,
+          action: rule.action,
+          targetFolderId: rule.target_folder_id
+        };
+      }
+    }
+    
+    return { blocked: false };
+  } catch (error) {
+    console.error("检查拦截规则错误:", error);
+    return { blocked: false };
+  }
+}
+
+// 规则匹配逻辑
+async function matchesRule(from, subject, body, rule) {
+  const value = rule.value.toLowerCase();
+  const fromLower = from.toLowerCase();
+  const subjectLower = subject.toLowerCase();
+  const bodyLower = body.toLowerCase();
+  
+  switch (rule.type) {
+    case 'sender':
+      return fromLower.includes(value);
+    case 'subject':
+      return subjectLower.includes(value);
+    case 'content':
+      return bodyLower.includes(value);
+    case 'sender_exact':
+      return fromLower === value;
+    case 'domain':
+      return fromLower.includes('@' + value);
+    default:
+      return false;
+  }
+}
+
+// 获取文件夹树形结构
+async function getFolderTree(env) {
+  try {
+    const folders = await env.DB.prepare(
+      "SELECT id, name, parent_id, is_system FROM folders ORDER BY is_system DESC, name"
+    ).all();
+    
+    // 构建树形结构
+    const folderMap = new Map();
+    const rootFolders = [];
+    
+    // 第一遍: 创建所有文件夹的映射
+    folders.results.forEach(folder => {
+      folderMap.set(folder.id, { ...folder, children: [] });
+    });
+    
+    // 第二遍: 构建树形结构
+    folders.results.forEach(folder => {
+      const folderNode = folderMap.get(folder.id);
+      if (folder.parent_id && folderMap.has(folder.parent_id)) {
+        folderMap.get(folder.parent_id).children.push(folderNode);
+      } else {
+        rootFolders.push(folderNode);
+      }
+    });
+    
+    return { success: true, folders: rootFolders };
+  } catch (error) {
+    return { success: false, message: error.message };
   }
 }
 
@@ -2377,40 +2994,5 @@ async function checkDatabaseStatus(env) {
       initialized: false,
       message: "数据库检查失败: " + error.message
     };
-  }
-}
-
-// 检查拦截规则
-async function checkBlockRules(from, subject, body, env) {
-  try {
-    const rules = await env.DB.prepare(
-      "SELECT type, value, action, target_folder_id FROM rules WHERE is_active = 1"
-    ).all();
-    
-    for (const rule of rules.results) {
-      let matches = false;
-      
-      switch (rule.type) {
-        case 'sender':
-          matches = from.includes(rule.value);
-          break;
-        case 'subject':
-          matches = subject.includes(rule.value);
-          break;
-        case 'content':
-          matches = body.includes(rule.value);
-          break;
-      }
-      
-      if (matches) {
-        console.log(`邮件匹配拦截规则: ${rule.type} = ${rule.value}`);
-        return true;
-      }
-    }
-    
-    return false;
-  } catch (error) {
-    console.error("检查拦截规则错误:", error);
-    return false;
   }
 }
